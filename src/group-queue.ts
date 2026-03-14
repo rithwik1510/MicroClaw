@@ -135,6 +135,10 @@ export class GroupQueue {
     if (groupFolder) state.groupFolder = groupFolder;
   }
 
+  isGroupActive(groupJid: string): boolean {
+    return this.getGroup(groupJid).active;
+  }
+
   /**
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.
@@ -156,6 +160,11 @@ export class GroupQueue {
     if (!state.active || !state.groupFolder || state.isTaskContainer)
       return false;
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
+    // Safety backstop: always schedule a post-run message drain.
+    // If the active agent exits before consuming this IPC file, the next
+    // drain run will still pick up pending DB messages instead of waiting
+    // for the user to send another "?" nudge.
+    state.pendingMessages = true;
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
     try {
