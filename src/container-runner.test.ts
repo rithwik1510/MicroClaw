@@ -8,11 +8,11 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 // Mock config
 vi.mock('./config.js', () => ({
-  CONTAINER_IMAGE: 'nanoclaw-agent:latest',
+  CONTAINER_IMAGE: 'microclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
-  DATA_DIR: '/tmp/nanoclaw-test-data',
-  GROUPS_DIR: '/tmp/nanoclaw-test-groups',
+  DATA_DIR: '/tmp/microclaw-test-data',
+  GROUPS_DIR: '/tmp/microclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
 }));
@@ -205,5 +205,30 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('passes browser ownership metadata into container secrets', async () => {
+    let stdinPayload = '';
+    fakeProc.stdin.on('data', (chunk) => {
+      stdinPayload += chunk.toString();
+    });
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      async () => {},
+    );
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await resultPromise;
+
+    const parsed = JSON.parse(stdinPayload) as {
+      secrets?: Record<string, string>;
+    };
+    expect(parsed.secrets?.NANOCLAW_GROUP_FOLDER).toBe('test-group');
+    expect(parsed.secrets?.NANOCLAW_CHAT_JID).toBe('test@g.us');
   });
 });
