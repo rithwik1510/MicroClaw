@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import { _initTestDatabase, getAllChats, storeChatMetadata } from './db.js';
 import { getAvailableGroups, _setRegisteredGroups } from './index.js';
+import { formatConversationHistory } from './router.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -166,5 +167,37 @@ describe('getAvailableGroups', () => {
   it('returns empty array when no chats exist', () => {
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(0);
+  });
+});
+
+describe('formatConversationHistory', () => {
+  it('includes both user and assistant roles in the prompt transcript', () => {
+    const prompt = formatConversationHistory(
+      [
+        {
+          id: '1',
+          chat_jid: 'dc:1',
+          sender: 'user-1',
+          sender_name: 'Rishi',
+          content: 'Hey, help me with this bug.',
+          timestamp: '2026-03-06T10:00:00.000Z',
+        },
+        {
+          id: '2',
+          chat_jid: 'dc:1',
+          sender: 'Andy',
+          sender_name: 'Andy',
+          content: 'Sure, show me the error first.',
+          timestamp: '2026-03-06T10:00:02.000Z',
+          is_bot_message: true,
+        },
+      ],
+      'Andy',
+    );
+
+    expect(prompt).toContain('role="user"');
+    expect(prompt).toContain('role="assistant"');
+    expect(prompt).toContain('Hey, help me with this bug.');
+    expect(prompt).toContain('Sure, show me the error first.');
   });
 });

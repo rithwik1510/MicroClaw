@@ -5,7 +5,16 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { processBrowserIpcGroup } from './browser/ipc.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  insertMemoryEntry,
+  queryMemoryFts,
+  updateTask,
+} from './db.js';
+import { appendDailyMemoryNotes } from './context/memory.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -144,6 +153,161 @@ export function startIpcWatcher(deps: IpcDeps): void {
       } catch (err) {
         logger.error({ err, sourceGroup }, 'Error reading IPC tasks directory');
       }
+
+      try {
+        await processBrowserIpcGroup(path.join(ipcBaseDir, sourceGroup));
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC browser directory',
+        );
+      }
+
+      // Process memory writes from agent (remember_this tool)
+      const memoryDir = path.join(ipcBaseDir, sourceGroup, 'memory');
+      try {
+        if (fs.existsSync(memoryDir)) {
+          const memoryFiles = fs
+            .readdirSync(memoryDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of memoryFiles) {
+            const filePath = path.join(memoryDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (
+                data.type === 'remember_this' &&
+                typeof data.content === 'string' &&
+                data.content.trim()
+              ) {
+                const kind =
+                  typeof data.kind === 'string' ? data.kind : 'explicit';
+                const content = data.content.trim();
+                const createdAt =
+                  typeof data.timestamp === 'string'
+                    ? data.timestamp
+                    : new Date().toISOString();
+                const pinned = data.pinned === true;
+
+                insertMemoryEntry({
+                  group_folder: sourceGroup,
+                  scope: 'group',
+                  kind,
+                  content,
+                  source: 'explicit',
+                  created_at: createdAt,
+                  pinned,
+                });
+
+                // Keep MD files in sync for human readability
+                try {
+                  appendDailyMemoryNotes(sourceGroup, [
+                    {
+                      kind: kind as 'pref' | 'fact' | 'proj' | 'loop',
+                      text: content,
+                      source: 'user',
+                      timestamp: createdAt,
+                    },
+                  ]);
+                } catch {
+                  /* non-fatal */
+                }
+
+                logger.info(
+                  { sourceGroup, kind, content: content.slice(0, 60) },
+                  'Memory entry saved via IPC',
+                );
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing IPC memory file',
+              );
+              const errorDir = path.join(ipcBaseDir, 'errors');
+              fs.mkdirSync(errorDir, { recursive: true });
+              fs.renameSync(
+                filePath,
+                path.join(errorDir, `${sourceGroup}-${file}`),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC memory directory',
+        );
+      }
+
+      const searchRequestsDir = path.join(
+        ipcBaseDir,
+        sourceGroup,
+        'memory-search-requests',
+      );
+      const searchResultsDir = path.join(
+        ipcBaseDir,
+        sourceGroup,
+        'memory-search-results',
+      );
+      try {
+        if (fs.existsSync(searchRequestsDir)) {
+          const requestFiles = fs
+            .readdirSync(searchRequestsDir)
+            .filter((f) => f.endsWith('.json'));
+          for (const file of requestFiles) {
+            const filePath = path.join(searchRequestsDir, file);
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              if (data.type === 'memory_search') {
+                const query =
+                  typeof data.query === 'string' ? data.query.trim() : '';
+                const limit =
+                  typeof data.limit === 'number' && data.limit > 0
+                    ? Math.min(20, Math.floor(data.limit))
+                    : 8;
+                const keywords = query.split(/\s+/).filter(Boolean);
+                const results =
+                  keywords.length > 0
+                    ? queryMemoryFts({
+                        groupFolder: sourceGroup,
+                        keywords,
+                        limit,
+                      }).map((row) => ({
+                        kind: row.kind,
+                        content: row.content,
+                        source: row.source,
+                      }))
+                    : [];
+
+                fs.mkdirSync(searchResultsDir, { recursive: true });
+                const resultPath = path.join(searchResultsDir, file);
+                const tempPath = `${resultPath}.tmp`;
+                fs.writeFileSync(
+                  tempPath,
+                  JSON.stringify({ results }, null, 2),
+                );
+                fs.renameSync(tempPath, resultPath);
+              }
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing memory search request',
+              );
+              try {
+                fs.unlinkSync(filePath);
+              } catch {
+                /* best effort cleanup */
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC memory search requests directory',
+        );
+      }
     }
 
     setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
@@ -161,6 +325,7 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
+    requested_prompt?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -257,6 +422,10 @@ export async function processTaskIpc(
           group_folder: targetFolder,
           chat_jid: targetJid,
           prompt: data.prompt,
+          requested_prompt:
+            typeof data.requested_prompt === 'string'
+              ? data.requested_prompt
+              : data.prompt,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
