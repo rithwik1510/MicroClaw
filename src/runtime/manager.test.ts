@@ -17,6 +17,11 @@ import { saveCredentials } from '../auth/vault.js';
 describe('runtime manager', () => {
   beforeEach(() => {
     _initTestDatabase();
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.NANOCLAW_DEFAULT_MODEL;
+    delete process.env.NANOCLAW_DEFAULT_BASE_URL;
+    delete process.env.OPENAI_COMPAT_BASE_URL;
+    delete process.env.NANOCLAW_PREFER_ENV_RUNTIME;
   });
 
   it('returns builtin default profile when no DB profiles exist', () => {
@@ -126,5 +131,50 @@ describe('runtime manager', () => {
         allowDesktopControl: false,
       }),
     );
+  });
+
+  it('does not prefer the env-configured cloud runtime unless explicitly enabled', () => {
+    process.env.OPENAI_API_KEY = 'test-api-key';
+    process.env.NANOCLAW_DEFAULT_MODEL =
+      'qwen/qwen3-235b-a22b-instruct-2507';
+    process.env.NANOCLAW_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+
+    setRuntimeProfile({
+      id: 'runtime-lmstudio-main',
+      provider: 'openai_compatible',
+      model: 'qwen/qwen3-8b',
+      enabled: true,
+      priority: 0,
+      endpointKind: 'lmstudio',
+      baseUrl: 'http://host.docker.internal:1234/v1',
+    });
+
+    const selection = resolveRuntimeSelection('discord_dm');
+    expect(selection.profiles[0].id).toBe('runtime-lmstudio-main');
+  });
+
+  it('prefers the env-configured cloud runtime when explicitly enabled', () => {
+    process.env.OPENAI_API_KEY = 'test-api-key';
+    process.env.NANOCLAW_DEFAULT_MODEL =
+      'qwen/qwen3-235b-a22b-instruct-2507';
+    process.env.NANOCLAW_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+    process.env.NANOCLAW_PREFER_ENV_RUNTIME = 'true';
+
+    setRuntimeProfile({
+      id: 'runtime-lmstudio-main',
+      provider: 'openai_compatible',
+      model: 'qwen/qwen3-8b',
+      enabled: true,
+      priority: 0,
+      endpointKind: 'lmstudio',
+      baseUrl: 'http://host.docker.internal:1234/v1',
+    });
+
+    const selection = resolveRuntimeSelection('discord_dm');
+    expect(selection.profiles[0].id).toBe('builtin-default');
+    expect(selection.profiles[0].model).toBe(
+      'qwen/qwen3-235b-a22b-instruct-2507',
+    );
+    expect(selection.profiles[0].baseUrl).toBe('https://openrouter.ai/api/v1');
   });
 });
