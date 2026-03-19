@@ -46,6 +46,7 @@ describe('apply', () => {
   });
 
   it('executes post_apply commands on success', async () => {
+    const markerRel = 'post-apply-marker.txt';
     const markerFile = path.join(tmpDir, 'post-apply-marker.txt');
     const skillDir = createSkillPackage(tmpDir, {
       skill: 'post-test',
@@ -54,7 +55,9 @@ describe('apply', () => {
       adds: ['src/newfile.ts'],
       modifies: [],
       addFiles: { 'src/newfile.ts': 'export const x = 1;' },
-      post_apply: [`echo "applied" > "${markerFile}"`],
+      post_apply: [
+        `node -e "require('fs').writeFileSync(process.argv[1], 'applied')" "${markerRel}"`,
+      ],
     });
 
     const result = await applySkill(skillDir);

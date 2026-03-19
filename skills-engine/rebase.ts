@@ -47,6 +47,50 @@ function collectTrackedFiles(state: ReturnType<typeof readState>): Set<string> {
   return tracked;
 }
 
+function writeEmptyTempFile(): string {
+  const tmpPath = path.join(os.tmpdir(), `nanoclaw-empty-${crypto.randomUUID()}`);
+  fs.writeFileSync(tmpPath, '', 'utf-8');
+  return tmpPath;
+}
+
+function unifiedDiff(oldPath: string, newPath: string): string {
+  const oldExists = fs.existsSync(oldPath);
+  const newExists = fs.existsSync(newPath);
+  if (!oldExists && !newExists) return '';
+
+  const oldArg = oldExists ? oldPath : writeEmptyTempFile();
+  const newArg = newExists ? newPath : writeEmptyTempFile();
+
+  try {
+    try {
+      return execFileSync('git', ['diff', '--no-index', '--', oldArg, newArg], {
+        encoding: 'utf-8',
+      });
+    } catch (err: unknown) {
+      const execErr = err as { status?: number; stdout?: string };
+      if (execErr.status === 1 && execErr.stdout) {
+        return execErr.stdout;
+      }
+      throw err;
+    }
+  } finally {
+    if (!oldExists) {
+      try {
+        fs.unlinkSync(oldArg);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    if (!newExists) {
+      try {
+        fs.unlinkSync(newArg);
+      } catch {
+        // best-effort cleanup
+      }
+    }
+  }
+}
+
 export async function rebase(newBasePath?: string): Promise<RebaseResult> {
   const projectRoot = process.cwd();
   const state = readState();
@@ -91,28 +135,10 @@ export async function rebase(newBasePath?: string): Promise<RebaseResult> {
       for (const relPath of trackedFiles) {
         const basePath = path.join(baseAbsDir, relPath);
         const workingPath = path.join(projectRoot, relPath);
-
-        const oldPath = fs.existsSync(basePath) ? basePath : '/dev/null';
-        const newPath = fs.existsSync(workingPath) ? workingPath : '/dev/null';
-
-        if (oldPath === '/dev/null' && newPath === '/dev/null') continue;
-
-        try {
-          const diff = execFileSync('diff', ['-ruN', oldPath, newPath], {
-            encoding: 'utf-8',
-          });
-          if (diff.trim()) {
-            combinedPatch += diff;
-            filesInPatch++;
-          }
-        } catch (err: unknown) {
-          const execErr = err as { status?: number; stdout?: string };
-          if (execErr.status === 1 && execErr.stdout) {
-            combinedPatch += execErr.stdout;
-            filesInPatch++;
-          } else {
-            throw err;
-          }
+        const diff = unifiedDiff(basePath, workingPath);
+        if (diff.trim()) {
+          combinedPatch += diff;
+          filesInPatch++;
         }
       }
 

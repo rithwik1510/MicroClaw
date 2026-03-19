@@ -88,6 +88,30 @@ export interface HeartbeatRunLog {
   error: string | null;
 }
 
+export interface RuntimeUsageMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  source: 'provider' | 'estimated';
+  requests?: number;
+}
+
+export interface RuntimeUsageLog {
+  groupFolder: string;
+  chatJid: string;
+  profileId?: string;
+  provider: RuntimeProvider;
+  model: string;
+  triggerKind: 'message' | 'scheduled_task' | 'heartbeat' | 'cli';
+  startedAt: string;
+  durationMs: number;
+  usage: RuntimeUsageMetrics;
+  inputCostUsd: number;
+  outputCostUsd: number;
+  totalCostUsd: number;
+  notes?: string;
+}
+
 // --- Runtime and routing contracts ---
 
 export type RuntimeProvider = 'claude' | 'openai_compatible';
@@ -150,6 +174,10 @@ export interface RuntimeToolPolicy {
   memory?: RuntimeToolFamilyPolicy;
   docs?: RuntimeToolFamilyPolicy;
   browser?: RuntimeToolFamilyPolicy;
+  /** When true, strip scheduling/watch tools so heartbeat can't create new tasks. */
+  isHeartbeat?: boolean;
+  /** When true, strip scheduling/watch tools so fired tasks can't re-schedule themselves. */
+  isScheduledTask?: boolean;
 }
 
 export interface RuntimeProfile {
@@ -387,6 +415,7 @@ export interface AgentRuntimeOutput {
   newSessionId?: string;
   lastAssistantUuid?: string;
   error?: string;
+  isPartial?: boolean;
 }
 
 export interface AgentRuntime {
@@ -447,14 +476,25 @@ export interface WizardSessionState {
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string): Promise<ChannelMessageRef | null>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
+  updateMessage?(
+    jid: string,
+    ref: ChannelMessageRef,
+    text: string,
+  ): Promise<void>;
+  deleteMessage?(jid: string, ref: ChannelMessageRef): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+}
+
+export interface ChannelMessageRef {
+  id: string;
+  jid: string;
 }
 
 // Callback type that channels use to deliver inbound messages

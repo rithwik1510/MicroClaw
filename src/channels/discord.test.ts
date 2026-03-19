@@ -727,7 +727,7 @@ describe('DiscordChannel', () => {
       // Should not throw
       await expect(
         channel.sendMessage('dc:1234567890123456', 'Will fail'),
-      ).resolves.toBeUndefined();
+      ).resolves.toBeNull();
     });
 
     it('does nothing when client is not initialized', async () => {
@@ -783,6 +783,49 @@ describe('DiscordChannel', () => {
       expect(sent2.length).toBeLessThanOrEqual(2000);
       expect(sent1).toBe(first);
       expect(sent2).toBe(second);
+    });
+
+    it('returns a message ref for the first sent Discord message', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const mockChannel = {
+        send: vi.fn().mockResolvedValue({ id: 'msg-1' }),
+        sendTyping: vi.fn(),
+      };
+      currentClient().channels.fetch.mockResolvedValue(mockChannel);
+
+      const ref = await channel.sendMessage('dc:1234567890123456', 'Hello');
+
+      expect(ref).toEqual({ id: 'msg-1', jid: 'dc:1234567890123456' });
+    });
+  });
+
+  describe('updateMessage', () => {
+    it('edits a previously sent Discord message', async () => {
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const edit = vi.fn().mockResolvedValue(undefined);
+      const mockChannel = {
+        messages: {
+          fetch: vi.fn().mockResolvedValue({
+            edit,
+          }),
+        },
+      };
+      currentClient().channels.fetch.mockResolvedValue(mockChannel);
+
+      await channel.updateMessage?.(
+        'dc:1234567890123456',
+        { id: 'msg-1', jid: 'dc:1234567890123456' },
+        'Updated',
+      );
+
+      expect(mockChannel.messages.fetch).toHaveBeenCalledWith('msg-1');
+      expect(edit).toHaveBeenCalledWith('Updated');
     });
   });
 

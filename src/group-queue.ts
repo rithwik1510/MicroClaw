@@ -2,13 +2,30 @@ import { ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import {
+  DATA_DIR,
+  MAX_CONCURRENT_CONTAINERS,
+  MAX_INTERACTIVE_CONTAINERS,
+  MAX_BACKGROUND_CONTAINERS,
+} from './config.js';
 import { logger } from './logger.js';
+
+/**
+ * Lane determines scheduling priority.
+ *
+ * - 'interactive' — user-facing messages. Always get a slot when available.
+ *   If all slots are taken by background work, the oldest background container
+ *   is preempted (sent _close) to free a slot.
+ * - 'background' — heartbeats and scheduled tasks. Run when slots are free,
+ *   but never block interactive. Capped at MAX_BACKGROUND_CONTAINERS concurrent.
+ */
+export type LaneType = 'interactive' | 'background';
 
 interface QueuedTask {
   id: string;
   groupJid: string;
   fn: () => Promise<void>;
+  lane: LaneType;
 }
 
 const MAX_RETRIES = 5;
@@ -24,12 +41,18 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  /** Lane of the currently running work in this group. */
+  activeLane: LaneType | null;
+  /** Timestamp when the current active run started (used for preemption ordering). */
+  activeStartedAt: number | null;
 }
 
 export class GroupQueue {
   private groups = new Map<string, GroupState>();
   private activeCount = 0;
-  private waitingGroups: string[] = [];
+  private backgroundActiveCount = 0;
+  private waitingInteractive: string[] = [];
+  private waitingBackground: string[] = [];
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
@@ -47,6 +70,8 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        activeLane: null,
+        activeStartedAt: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -70,24 +95,32 @@ export class GroupQueue {
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
-      if (!this.waitingGroups.includes(groupJid)) {
-        this.waitingGroups.push(groupJid);
+      if (!this.waitingInteractive.includes(groupJid)) {
+        this.waitingInteractive.push(groupJid);
       }
+      // Interactive: try to preempt the oldest background container to free a slot.
+      this.tryPreemptBackground();
       logger.debug(
         { groupJid, activeCount: this.activeCount },
-        'At concurrency limit, message queued',
+        'At concurrency limit, interactive message queued (attempting background preemption)',
       );
       return;
     }
 
-    this.runForGroup(groupJid, 'messages').catch((err) =>
+    this.runForGroup(groupJid, 'messages', 'interactive').catch((err) =>
       logger.error({ groupJid, err }, 'Unhandled error in runForGroup'),
     );
   }
 
-  enqueueTask(groupJid: string, taskId: string, fn: () => Promise<void>): void {
+  enqueueTask(
+    groupJid: string,
+    taskId: string,
+    fn: () => Promise<void>,
+    options?: { lane?: LaneType },
+  ): void {
     if (this.shuttingDown) return;
 
+    const lane: LaneType = options?.lane ?? 'background';
     const state = this.getGroup(groupJid);
 
     // Prevent double-queuing of the same task
@@ -97,28 +130,48 @@ export class GroupQueue {
     }
 
     if (state.active) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
+      state.pendingTasks.push({ id: taskId, groupJid, fn, lane });
       if (state.idleWaiting) {
         this.closeStdin(groupJid);
       }
-      logger.debug({ groupJid, taskId }, 'Container active, task queued');
+      logger.debug({ groupJid, taskId, lane }, 'Container active, task queued');
       return;
     }
 
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
-      state.pendingTasks.push({ id: taskId, groupJid, fn });
-      if (!this.waitingGroups.includes(groupJid)) {
-        this.waitingGroups.push(groupJid);
+      state.pendingTasks.push({ id: taskId, groupJid, fn, lane });
+      const waitingList =
+        lane === 'interactive'
+          ? this.waitingInteractive
+          : this.waitingBackground;
+      if (!waitingList.includes(groupJid)) {
+        waitingList.push(groupJid);
+      }
+      if (lane === 'interactive') {
+        this.tryPreemptBackground();
       }
       logger.debug(
-        { groupJid, taskId, activeCount: this.activeCount },
+        { groupJid, taskId, lane, activeCount: this.activeCount },
         'At concurrency limit, task queued',
       );
       return;
     }
 
+    // Background lane: enforce its own concurrency limit
+    if (lane === 'background' && this.backgroundActiveCount >= MAX_BACKGROUND_CONTAINERS) {
+      state.pendingTasks.push({ id: taskId, groupJid, fn, lane });
+      if (!this.waitingBackground.includes(groupJid)) {
+        this.waitingBackground.push(groupJid);
+      }
+      logger.debug(
+        { groupJid, taskId, activeCount: this.activeCount, backgroundActiveCount: this.backgroundActiveCount },
+        'At background concurrency limit, task queued',
+      );
+      return;
+    }
+
     // Run immediately
-    this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
+    this.runTask(groupJid, { id: taskId, groupJid, fn, lane }).catch((err) =>
       logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
     );
   }
@@ -196,19 +249,56 @@ export class GroupQueue {
     }
   }
 
+  /**
+   * Attempt to preempt the oldest background container to free a slot for interactive work.
+   * Only preempts if we're at the global limit and there are background containers running.
+   */
+  private tryPreemptBackground(): void {
+    if (this.activeCount < MAX_CONCURRENT_CONTAINERS) return;
+    if (this.backgroundActiveCount === 0) return;
+
+    // Find the background container that started earliest
+    let oldestJid: string | null = null;
+    let oldestStartedAt = Infinity;
+
+    for (const [jid, state] of this.groups) {
+      if (
+        state.active &&
+        state.activeLane === 'background' &&
+        state.activeStartedAt !== null &&
+        state.activeStartedAt < oldestStartedAt
+      ) {
+        oldestJid = jid;
+        oldestStartedAt = state.activeStartedAt;
+      }
+    }
+
+    if (oldestJid) {
+      logger.info(
+        { preemptedJid: oldestJid },
+        'Preempting background container to free slot for interactive message',
+      );
+      this.closeStdin(oldestJid);
+    }
+  }
+
   private async runForGroup(
     groupJid: string,
     reason: 'messages' | 'drain',
+    lane: LaneType = 'interactive',
   ): Promise<void> {
     const state = this.getGroup(groupJid);
     state.active = true;
     state.idleWaiting = false;
     state.isTaskContainer = false;
     state.pendingMessages = false;
+    state.activeLane = lane;
+    state.activeStartedAt = Date.now();
     this.activeCount++;
+    if (lane === 'background') this.backgroundActiveCount++;
 
     logger.debug(
-      { groupJid, reason, activeCount: this.activeCount },
+      { groupJid, reason, lane, activeCount: this.activeCount, backgroundActiveCount: this.backgroundActiveCount },
       'Starting container for group',
     );
 
@@ -225,11 +315,15 @@ export class GroupQueue {
       logger.error({ groupJid, err }, 'Error processing messages for group');
       this.scheduleRetry(groupJid, state);
     } finally {
+      const wasBackground = state.activeLane === 'background';
       state.active = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.activeLane = null;
+      state.activeStartedAt = null;
       this.activeCount--;
+      if (wasBackground) this.backgroundActiveCount--;
       this.drainGroup(groupJid);
     }
   }
@@ -239,10 +333,13 @@ export class GroupQueue {
     state.active = true;
     state.idleWaiting = false;
     state.isTaskContainer = true;
+    state.activeLane = task.lane;
+    state.activeStartedAt = Date.now();
     this.activeCount++;
+    if (task.lane === 'background') this.backgroundActiveCount++;
 
     logger.debug(
-      { groupJid, taskId: task.id, activeCount: this.activeCount },
+      { groupJid, taskId: task.id, lane: task.lane, activeCount: this.activeCount },
       'Running queued task',
     );
 
@@ -251,12 +348,16 @@ export class GroupQueue {
     } catch (err) {
       logger.error({ groupJid, taskId: task.id, err }, 'Error running task');
     } finally {
+      const wasBackground = state.activeLane === 'background';
       state.active = false;
       state.isTaskContainer = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
+      state.activeLane = null;
+      state.activeStartedAt = null;
       this.activeCount--;
+      if (wasBackground) this.backgroundActiveCount--;
       this.drainGroup(groupJid);
     }
   }
@@ -289,21 +390,59 @@ export class GroupQueue {
 
     const state = this.getGroup(groupJid);
 
-    // Tasks first (they won't be re-discovered from SQLite like messages)
-    if (state.pendingTasks.length > 0) {
-      const task = state.pendingTasks.shift()!;
-      this.runTask(groupJid, task).catch((err) =>
+    // Tasks first (they won't be re-discovered from SQLite like messages).
+    // Prioritize interactive tasks before background.
+    const interactiveTasks = state.pendingTasks.filter((t) => t.lane === 'interactive');
+    const backgroundTasks = state.pendingTasks.filter((t) => t.lane === 'background');
+    const nextTask = interactiveTasks[0] ?? backgroundTasks[0];
+
+    if (nextTask) {
+      // Check lane capacity before dispatching
+      if (
+        nextTask.lane === 'background' &&
+        this.backgroundActiveCount >= MAX_BACKGROUND_CONTAINERS
+      ) {
+        if (!this.waitingBackground.includes(groupJid)) {
+          this.waitingBackground.push(groupJid);
+        }
+        this.drainWaiting();
+        return;
+      }
+      if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
+        const waitingList =
+          nextTask.lane === 'interactive'
+            ? this.waitingInteractive
+            : this.waitingBackground;
+        if (!waitingList.includes(groupJid)) {
+          waitingList.push(groupJid);
+        }
+        if (nextTask.lane === 'interactive') {
+          this.tryPreemptBackground();
+        }
+        this.drainWaiting();
+        return;
+      }
+      state.pendingTasks.splice(state.pendingTasks.indexOf(nextTask), 1);
+      this.runTask(groupJid, nextTask).catch((err) =>
         logger.error(
-          { groupJid, taskId: task.id, err },
+          { groupJid, taskId: nextTask.id, err },
           'Unhandled error in runTask (drain)',
         ),
       );
       return;
     }
 
-    // Then pending messages
+    // Then pending messages (always interactive)
     if (state.pendingMessages) {
-      this.runForGroup(groupJid, 'drain').catch((err) =>
+      if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
+        if (!this.waitingInteractive.includes(groupJid)) {
+          this.waitingInteractive.push(groupJid);
+        }
+        this.tryPreemptBackground();
+        this.drainWaiting();
+        return;
+      }
+      this.runForGroup(groupJid, 'drain', 'interactive').catch((err) =>
         logger.error(
           { groupJid, err },
           'Unhandled error in runForGroup (drain)',
@@ -317,31 +456,54 @@ export class GroupQueue {
   }
 
   private drainWaiting(): void {
+    // Drain interactive waiting groups first (priority)
     while (
-      this.waitingGroups.length > 0 &&
+      this.waitingInteractive.length > 0 &&
       this.activeCount < MAX_CONCURRENT_CONTAINERS
     ) {
-      const nextJid = this.waitingGroups.shift()!;
+      const nextJid = this.waitingInteractive.shift()!;
       const state = this.getGroup(nextJid);
 
-      // Prioritize tasks over messages
-      if (state.pendingTasks.length > 0) {
-        const task = state.pendingTasks.shift()!;
+      const interactiveTasks = state.pendingTasks.filter((t) => t.lane === 'interactive');
+      const task = interactiveTasks[0];
+      if (task) {
+        state.pendingTasks.splice(state.pendingTasks.indexOf(task), 1);
         this.runTask(nextJid, task).catch((err) =>
           logger.error(
             { groupJid: nextJid, taskId: task.id, err },
-            'Unhandled error in runTask (waiting)',
+            'Unhandled error in runTask (waiting interactive)',
           ),
         );
       } else if (state.pendingMessages) {
-        this.runForGroup(nextJid, 'drain').catch((err) =>
+        this.runForGroup(nextJid, 'drain', 'interactive').catch((err) =>
           logger.error(
             { groupJid: nextJid, err },
-            'Unhandled error in runForGroup (waiting)',
+            'Unhandled error in runForGroup (waiting interactive)',
           ),
         );
       }
-      // If neither pending, skip this group
+    }
+
+    // Then drain background waiting groups
+    while (
+      this.waitingBackground.length > 0 &&
+      this.activeCount < MAX_CONCURRENT_CONTAINERS &&
+      this.backgroundActiveCount < MAX_BACKGROUND_CONTAINERS
+    ) {
+      const nextJid = this.waitingBackground.shift()!;
+      const state = this.getGroup(nextJid);
+
+      const backgroundTasks = state.pendingTasks.filter((t) => t.lane === 'background');
+      const task = backgroundTasks[0];
+      if (task) {
+        state.pendingTasks.splice(state.pendingTasks.indexOf(task), 1);
+        this.runTask(nextJid, task).catch((err) =>
+          logger.error(
+            { groupJid: nextJid, taskId: task.id, err },
+            'Unhandled error in runTask (waiting background)',
+          ),
+        );
+      }
     }
   }
 
@@ -352,7 +514,7 @@ export class GroupQueue {
     // via idle timeout or container timeout. The --rm flag cleans them up on exit.
     // This prevents WhatsApp reconnection restarts from killing working agents.
     const activeContainers: string[] = [];
-    for (const [jid, state] of this.groups) {
+    for (const [, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeContainers.push(state.containerName);
       }

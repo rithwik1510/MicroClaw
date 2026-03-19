@@ -650,14 +650,18 @@ describe('local endpoint and capability cache storage', () => {
   });
 
   it('stores provider capability cache', () => {
-    setProviderCapability('openai_compatible', 'http://host.docker.internal:1234/v1', {
-      supportsResponses: true,
-      supportsChatCompletions: true,
-      supportsTools: false,
-      supportsStreaming: true,
-      requiresApiKey: false,
-      checkedAt: '2026-01-01T00:00:00.000Z',
-    });
+    setProviderCapability(
+      'openai_compatible',
+      'http://host.docker.internal:1234/v1',
+      {
+        supportsResponses: true,
+        supportsChatCompletions: true,
+        supportsTools: false,
+        supportsStreaming: true,
+        requiresApiKey: false,
+        checkedAt: '2026-01-01T00:00:00.000Z',
+      },
+    );
     const cap = getProviderCapability(
       'openai_compatible',
       'http://host.docker.internal:1234/v1',
@@ -713,7 +717,11 @@ describe('wizard and refresh lock storage', () => {
 
 // --- Memory FTS5 (insertMemoryEntry, queryMemoryFts, getPinnedMemoryEntries) ---
 
-function memEntry(overrides: Partial<Parameters<typeof insertMemoryEntry>[0]> & { content: string }) {
+function memEntry(
+  overrides: Partial<Parameters<typeof insertMemoryEntry>[0]> & {
+    content: string;
+  },
+) {
   return insertMemoryEntry({
     group_folder: 'test_group',
     scope: 'group',
@@ -735,21 +743,39 @@ describe('insertMemoryEntry', () => {
     memEntry({ content: 'I prefer dark mode', kind: 'pref' });
     memEntry({ content: 'prefer dark mode', kind: 'pref' });
     // both normalize to "prefer dark mode" — only one entry
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['dark'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['dark'],
+    });
     expect(results).toHaveLength(1);
   });
 
   it('upgrades an existing entry to pinned when a duplicate with pin:true is inserted', () => {
     memEntry({ content: 'prefer dark mode', kind: 'pref', source: 'explicit' });
-    memEntry({ content: 'prefer dark mode', kind: 'pref', source: 'explicit', pinned: true });
+    memEntry({
+      content: 'prefer dark mode',
+      kind: 'pref',
+      source: 'explicit',
+      pinned: true,
+    });
     const pinned = getPinnedMemoryEntries('test_group');
     expect(pinned).toHaveLength(1);
     expect(pinned[0].content).toBe('prefer dark mode');
   });
 
   it('does not downgrade a pinned entry when same content re-inserted without pin', () => {
-    memEntry({ content: 'prefer dark mode', kind: 'pref', source: 'explicit', pinned: true });
-    memEntry({ content: 'prefer dark mode', kind: 'pref', source: 'explicit', pinned: false });
+    memEntry({
+      content: 'prefer dark mode',
+      kind: 'pref',
+      source: 'explicit',
+      pinned: true,
+    });
+    memEntry({
+      content: 'prefer dark mode',
+      kind: 'pref',
+      source: 'explicit',
+      pinned: false,
+    });
     const pinned = getPinnedMemoryEntries('test_group');
     expect(pinned).toHaveLength(1); // still pinned
   });
@@ -768,29 +794,57 @@ describe('insertMemoryEntry', () => {
 describe('queryMemoryFts', () => {
   it('returns empty array when keywords list is empty', () => {
     memEntry({ content: 'something interesting' });
-    expect(queryMemoryFts({ groupFolder: 'test_group', keywords: [] })).toHaveLength(0);
+    expect(
+      queryMemoryFts({ groupFolder: 'test_group', keywords: [] }),
+    ).toHaveLength(0);
   });
 
   it('returns matching entries for keywords', () => {
     memEntry({ content: 'user enjoys cooking Italian food', kind: 'fact' });
     memEntry({ content: 'user prefers dark mode', kind: 'pref' });
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['cooking', 'italian'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['cooking', 'italian'],
+    });
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('cooking');
   });
 
   it('excludes pinned entries (they are returned separately)', () => {
-    memEntry({ content: 'always use metric units', kind: 'pref', source: 'explicit', pinned: true });
-    memEntry({ content: 'metric is better than imperial', kind: 'fact', source: 'auto' });
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['metric'] });
+    memEntry({
+      content: 'always use metric units',
+      kind: 'pref',
+      source: 'explicit',
+      pinned: true,
+    });
+    memEntry({
+      content: 'metric is better than imperial',
+      kind: 'fact',
+      source: 'auto',
+    });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['metric'],
+    });
     expect(results).toHaveLength(1);
     expect(results[0].content).toContain('better than imperial'); // pinned entry excluded
   });
 
   it('ranks explicit source entries above auto for same keyword match', () => {
-    memEntry({ content: 'fridgechef cooking project notes', kind: 'proj', source: 'auto' });
-    memEntry({ content: 'fridgechef uses local models', kind: 'proj', source: 'explicit' });
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['fridgechef'] });
+    memEntry({
+      content: 'fridgechef cooking project notes',
+      kind: 'proj',
+      source: 'auto',
+    });
+    memEntry({
+      content: 'fridgechef uses local models',
+      kind: 'proj',
+      source: 'explicit',
+    });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['fridgechef'],
+    });
     expect(results).toHaveLength(2);
     expect(results[0].source).toBe('explicit'); // boosted rank comes first
   });
@@ -813,7 +867,10 @@ describe('queryMemoryFts', () => {
       created_at: new Date().toISOString(),
     });
 
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['supabase', 'edge'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['supabase', 'edge'],
+    });
     expect(results).toHaveLength(2);
     expect(results[0].content).toContain('today');
     expect(results[0].rank).toBeLessThan(results[1].rank);
@@ -837,7 +894,10 @@ describe('queryMemoryFts', () => {
       created_at: new Date().toISOString(),
     });
 
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['microclaw', 'runtime', 'local'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['microclaw', 'runtime', 'local'],
+    });
     expect(results).toHaveLength(2);
     expect(results[0].content).toContain('recent');
     expect(results[0].source).toBe('explicit');
@@ -861,7 +921,10 @@ describe('queryMemoryFts', () => {
       created_at: new Date().toISOString(),
     });
 
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['token', 'stored', 'env'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['token', 'stored', 'env'],
+    });
     expect(results).toHaveLength(2);
     // BM25 rank is negative. Old rank * decayFactor(<1) becomes less negative,
     // so it sorts lower in ascending order. That drop is the intended behavior.
@@ -872,32 +935,49 @@ describe('queryMemoryFts', () => {
 
   it('respects the limit parameter', () => {
     for (let i = 0; i < 10; i++) {
-      memEntry({ content: `project note about cooking number ${i}`, kind: 'proj' });
+      memEntry({
+        content: `project note about cooking number ${i}`,
+        kind: 'proj',
+      });
     }
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['cooking'], limit: 3 });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['cooking'],
+      limit: 3,
+    });
     expect(results).toHaveLength(3);
   });
 
   it('returns empty gracefully when no entries match', () => {
     memEntry({ content: 'user prefers dark mode' });
-    const results = queryMemoryFts({ groupFolder: 'test_group', keywords: ['completely', 'unrelated', 'term'] });
+    const results = queryMemoryFts({
+      groupFolder: 'test_group',
+      keywords: ['completely', 'unrelated', 'term'],
+    });
     expect(results).toHaveLength(0);
   });
 
   it('handles FTS5 special characters in keywords without throwing', () => {
     memEntry({ content: 'test entry for special chars' });
     // These chars would break raw FTS5 MATCH — our sanitizer should handle them
-    expect(() => queryMemoryFts({
-      groupFolder: 'test_group',
-      keywords: ['"quoted"', 'star*', 'caret^'],
-    })).not.toThrow();
+    expect(() =>
+      queryMemoryFts({
+        groupFolder: 'test_group',
+        keywords: ['"quoted"', 'star*', 'caret^'],
+      }),
+    ).not.toThrow();
   });
 });
 
 describe('getPinnedMemoryEntries', () => {
   it('returns only pinned entries for a group', () => {
     memEntry({ content: 'not pinned', kind: 'fact' });
-    memEntry({ content: 'pinned fact', kind: 'fact', source: 'explicit', pinned: true });
+    memEntry({
+      content: 'pinned fact',
+      kind: 'fact',
+      source: 'explicit',
+      pinned: true,
+    });
     const pinned = getPinnedMemoryEntries('test_group');
     expect(pinned).toHaveLength(1);
     expect(pinned[0].content).toBe('pinned fact');
@@ -926,7 +1006,12 @@ describe('getPinnedMemoryEntries', () => {
   });
 
   it('does not return pinned entries from other groups', () => {
-    memEntry({ group_folder: 'group_a', content: 'pinned for group a', source: 'explicit', pinned: true });
+    memEntry({
+      group_folder: 'group_a',
+      content: 'pinned for group a',
+      source: 'explicit',
+      pinned: true,
+    });
     expect(getPinnedMemoryEntries('group_b')).toHaveLength(0);
   });
 });

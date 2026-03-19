@@ -43,7 +43,8 @@ export async function run(_args: string[]): Promise<void> {
   const hasEnv = fs.existsSync(path.join(projectRoot, '.env'));
 
   const authDir = path.join(projectRoot, 'store', 'auth');
-  const hasAuth = fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
+  const hasAuth =
+    fs.existsSync(authDir) && fs.existsSync(path.join(authDir, 'creds.json'));
 
   let hasRegisteredGroups = false;
   // Check JSON file first (pre-migration)

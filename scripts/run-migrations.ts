@@ -1,24 +1,9 @@
 #!/usr/bin/env tsx
-import { execFileSync, execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 
 import { compareSemver } from '../skills-engine/state.js';
-
-// Resolve tsx binary once to avoid npx race conditions across migrations
-function resolveTsx(): string {
-  // Check local node_modules first
-  const local = path.resolve('node_modules/.bin/tsx');
-  if (fs.existsSync(local)) return local;
-  // Fall back to whichever tsx is in PATH
-  try {
-    return execSync('which tsx', { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'npx'; // last resort
-  }
-}
-
-const tsxBin = resolveTsx();
 
 const fromVersion = process.argv[2];
 const toVersion = process.argv[3];
@@ -71,19 +56,18 @@ for (const version of migrationVersions) {
     continue;
   }
 
+  const originalArgv = [...process.argv];
   try {
-    const tsxArgs = tsxBin.endsWith('npx')
-      ? ['tsx', migrationIndex, projectRoot]
-      : [migrationIndex, projectRoot];
-    execFileSync(tsxBin, tsxArgs, {
-      stdio: 'pipe',
-      cwd: projectRoot,
-      timeout: 120_000,
-    });
+    // Preserve existing migration contract: migration reads root from process.argv[2].
+    process.argv[2] = projectRoot;
+    const fileUrl = `${pathToFileURL(migrationIndex).href}?v=${Date.now()}`;
+    await import(fileUrl);
     results.push({ version, success: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     results.push({ version, success: false, error: message });
+  } finally {
+    process.argv = originalArgv;
   }
 }
 

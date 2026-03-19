@@ -194,7 +194,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   kind,
                   content,
                   source: 'explicit',
+                  origin: 'explicit_request',
+                  durability: pinned ? 'pinned' : 'durable',
+                  confidence: pinned ? 0.98 : 0.95,
                   created_at: createdAt,
+                  last_confirmed_at: createdAt,
                   pinned,
                 });
 
@@ -206,6 +210,9 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       text: content,
                       source: 'user',
                       timestamp: createdAt,
+                      origin: 'explicit_request',
+                      durability: pinned ? 'pinned' : 'durable',
+                      confidence: pinned ? 0.98 : 0.95,
                     },
                   ]);
                 } catch {

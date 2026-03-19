@@ -108,9 +108,9 @@ function makeSearchContextBlock(input: {
       ? [
           'Fetched pages:',
           ...input.fetched.slice(0, 3).map((item, index) =>
-            `${index + 1}. ${item.title || '(untitled)'} | ${item.finalUrl || item.url} | ${item.excerpt}`.slice(0, 720),
+            `${index + 1}. ${item.title || '(untitled)'} | ${item.finalUrl || item.url}\n${item.excerpt}`.slice(0, 2500),
           ),
-        ].join('\n')
+        ].join('\n\n')
       : '';
   const providerSummary =
     input.providerText && input.providerText.trim()
@@ -192,9 +192,9 @@ export async function executeWebSearch(
 
     if (result.results.length > 0) {
       const fetched: FetchedDocument[] = [];
-      for (const item of result.results.slice(0, 2)) {
+      for (const item of result.results.slice(0, 3)) {
         try {
-          const fetchResult = await performFetch(item.url, ctx, 1600);
+          const fetchResult = await performFetch(item.url, ctx, 4000);
           fetched.push(fetchResult.document);
         } catch {
           // best effort; search results are still useful

@@ -135,8 +135,7 @@ describe('runtime manager', () => {
 
   it('does not prefer the env-configured cloud runtime unless explicitly enabled', () => {
     process.env.OPENAI_API_KEY = 'test-api-key';
-    process.env.NANOCLAW_DEFAULT_MODEL =
-      'qwen/qwen3-235b-a22b-instruct-2507';
+    process.env.NANOCLAW_DEFAULT_MODEL = 'qwen/qwen3-235b-a22b-instruct-2507';
     process.env.NANOCLAW_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 
     setRuntimeProfile({
@@ -155,8 +154,7 @@ describe('runtime manager', () => {
 
   it('prefers the env-configured cloud runtime when explicitly enabled', () => {
     process.env.OPENAI_API_KEY = 'test-api-key';
-    process.env.NANOCLAW_DEFAULT_MODEL =
-      'qwen/qwen3-235b-a22b-instruct-2507';
+    process.env.NANOCLAW_DEFAULT_MODEL = 'qwen/qwen3-235b-a22b-instruct-2507';
     process.env.NANOCLAW_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
     process.env.NANOCLAW_PREFER_ENV_RUNTIME = 'true';
 

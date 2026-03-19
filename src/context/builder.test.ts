@@ -97,6 +97,31 @@ describe('buildContextBundle', () => {
     expect(dailyLayer?.inclusionReason).toBe('no_strong_keywords');
   });
 
+  it('keeps a compact memory anchor on short conversational turns', async () => {
+    fs.writeFileSync(
+      path.join(groupsDir, 'global', 'SOUL.md'),
+      '# Soul\n- Be steady.\n',
+    );
+    fs.writeFileSync(
+      path.join(groupsDir, 'discord_dm', 'MEMORY.md'),
+      '# Memory\n\n## Current Priorities\n- Keep helping Rishi with job search and app-building momentum\n\n## Standing Instructions\n- Keep replies practical and grounded\n',
+    );
+
+    const { buildContextBundle } = await import('./builder.js');
+    const bundle = buildContextBundle({
+      groupFolder: 'discord_dm',
+      prompt: '[Current message - respond to this]\nhi',
+      today: new Date('2026-03-07T10:30:00.000Z'),
+    });
+
+    const memoryLayer = bundle.diagnostics.layers.find(
+      (layer) => layer.kind === 'memory',
+    );
+    expect(memoryLayer?.included).toBe(true);
+    expect(memoryLayer?.inclusionReason).toBe('always_on_anchor');
+    expect(bundle.systemPrompt).toContain('## MEMORY');
+  });
+
   it('trims low-priority layers before dropping soul context', async () => {
     fs.writeFileSync(
       path.join(groupsDir, 'global', 'SOUL.md'),

@@ -14,6 +14,7 @@ import {
   ProviderCapability,
   RegisteredGroup,
   RuntimeEvent,
+  RuntimeUsageLog,
   RuntimeProfile,
   ScheduledTask,
   ConversationSummary,
@@ -156,6 +157,32 @@ function createSchema(database: Database.Database): void {
       ON runtime_events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_runtime_events_group_ts
       ON runtime_events(group_folder, timestamp);
+
+    CREATE TABLE IF NOT EXISTS runtime_usage_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      chat_jid TEXT NOT NULL,
+      profile_id TEXT,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      trigger_kind TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      input_tokens INTEGER NOT NULL,
+      output_tokens INTEGER NOT NULL,
+      total_tokens INTEGER NOT NULL,
+      usage_source TEXT NOT NULL,
+      request_count INTEGER,
+      input_cost_usd REAL NOT NULL,
+      output_cost_usd REAL NOT NULL,
+      total_cost_usd REAL NOT NULL,
+      notes TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_runtime_usage_logs_group_ts
+      ON runtime_usage_logs(group_folder, created_at);
+    CREATE INDEX IF NOT EXISTS idx_runtime_usage_logs_trigger_ts
+      ON runtime_usage_logs(trigger_kind, created_at);
 
     CREATE TABLE IF NOT EXISTS browser_action_audit (
       id TEXT PRIMARY KEY,
@@ -329,7 +356,9 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
   try {
-    database.exec(`ALTER TABLE runtime_profiles ADD COLUMN auth_profile_id TEXT`);
+    database.exec(
+      `ALTER TABLE runtime_profiles ADD COLUMN auth_profile_id TEXT`,
+    );
   } catch {
     /* column already exists */
   }
@@ -341,12 +370,16 @@ function createSchema(database: Database.Database): void {
 
   // Auth profile metadata extensions
   try {
-    database.exec(`ALTER TABLE auth_profiles ADD COLUMN provider_account_id TEXT`);
+    database.exec(
+      `ALTER TABLE auth_profiles ADD COLUMN provider_account_id TEXT`,
+    );
   } catch {
     /* column already exists */
   }
   try {
-    database.exec(`ALTER TABLE auth_profiles ADD COLUMN refresh_eligible INTEGER DEFAULT 0`);
+    database.exec(
+      `ALTER TABLE auth_profiles ADD COLUMN refresh_eligible INTEGER DEFAULT 0`,
+    );
   } catch {
     /* column already exists */
   }
@@ -371,7 +404,12 @@ function createSchema(database: Database.Database): void {
       content TEXT NOT NULL,
       content_normalized TEXT NOT NULL,
       source TEXT NOT NULL DEFAULT 'auto',
+      origin TEXT NOT NULL DEFAULT 'conversation',
+      durability TEXT NOT NULL DEFAULT 'durable',
+      confidence REAL NOT NULL DEFAULT 0.7,
       created_at TEXT NOT NULL,
+      last_confirmed_at TEXT,
+      superseded_at TEXT,
       source_file TEXT,
       pinned INTEGER NOT NULL DEFAULT 0
     );
@@ -380,7 +418,6 @@ function createSchema(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_memory_entries_pinned
       ON memory_entries(group_folder, pinned)
       WHERE pinned = 1;
-
     CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
       content,
       kind,
@@ -398,7 +435,9 @@ function createSchema(database: Database.Database): void {
         VALUES (new.id, new.content, new.kind);
       END;
     `);
-  } catch { /* trigger already exists */ }
+  } catch {
+    /* trigger already exists */
+  }
   try {
     database.exec(`
       CREATE TRIGGER memory_fts_ad AFTER DELETE ON memory_entries BEGIN
@@ -406,7 +445,9 @@ function createSchema(database: Database.Database): void {
         VALUES ('delete', old.id, old.content, old.kind);
       END;
     `);
-  } catch { /* trigger already exists */ }
+  } catch {
+    /* trigger already exists */
+  }
   try {
     database.exec(`
       CREATE TRIGGER memory_fts_au AFTER UPDATE ON memory_entries BEGIN
@@ -416,7 +457,9 @@ function createSchema(database: Database.Database): void {
         VALUES (new.id, new.content, new.kind);
       END;
     `);
-  } catch { /* trigger already exists */ }
+  } catch {
+    /* trigger already exists */
+  }
 }
 
 export function initDatabase(): void {
@@ -428,8 +471,86 @@ export function initDatabase(): void {
 
   // Add pinned column to memory_entries for existing databases
   try {
-    db.exec(`ALTER TABLE memory_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`);
-  } catch { /* column already exists */ }
+    db.exec(
+      `ALTER TABLE memory_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(
+      `ALTER TABLE memory_entries ADD COLUMN origin TEXT NOT NULL DEFAULT 'conversation'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(
+      `ALTER TABLE memory_entries ADD COLUMN durability TEXT NOT NULL DEFAULT 'durable'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(
+      `ALTER TABLE memory_entries ADD COLUMN confidence REAL NOT NULL DEFAULT 0.7`,
+    );
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(`ALTER TABLE memory_entries ADD COLUMN last_confirmed_at TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(`ALTER TABLE memory_entries ADD COLUMN superseded_at TEXT`);
+  } catch {
+    /* column already exists */
+  }
+  try {
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_memory_entries_active
+       ON memory_entries(group_folder, kind, superseded_at)`,
+    );
+  } catch {
+    /* index already exists */
+  }
+  try {
+    db.exec(
+      `UPDATE memory_entries
+       SET origin = CASE source
+         WHEN 'explicit' THEN 'explicit_request'
+         WHEN 'migration' THEN 'migration'
+         ELSE 'conversation'
+       END
+       WHERE origin IS NULL OR origin = ''`,
+    );
+  } catch {
+    /* best effort backfill */
+  }
+  try {
+    db.exec(
+      `UPDATE memory_entries
+       SET durability = CASE
+         WHEN pinned = 1 THEN 'pinned'
+         WHEN source = 'migration' THEN 'durable'
+         ELSE 'durable'
+       END
+       WHERE durability IS NULL OR durability = ''`,
+    );
+  } catch {
+    /* best effort backfill */
+  }
+  try {
+    db.exec(
+      `UPDATE memory_entries
+       SET last_confirmed_at = created_at
+       WHERE last_confirmed_at IS NULL`,
+    );
+  } catch {
+    /* best effort backfill */
+  }
 
   // Migrate from JSON files if they exist
   migrateJsonState();
@@ -853,11 +974,11 @@ export function getRecentTaskFailuresForGroup(
       `,
       )
       .all(groupFolder, sinceIso, boundedLimit) as Array<{
-        task_id: string;
-        prompt: string;
-        run_at: string;
-        error: string | null;
-      }>;
+      task_id: string;
+      prompt: string;
+      run_at: string;
+      error: string | null;
+    }>;
   }
 
   return db
@@ -872,11 +993,11 @@ export function getRecentTaskFailuresForGroup(
     `,
     )
     .all(groupFolder, boundedLimit) as Array<{
-      task_id: string;
-      prompt: string;
-      run_at: string;
-      error: string | null;
-    }>;
+    task_id: string;
+    prompt: string;
+    run_at: string;
+    error: string | null;
+  }>;
 }
 
 // --- Router state accessors ---
@@ -1111,7 +1232,9 @@ export function getRuntimeProfile(id: string): RuntimeProfile | undefined {
 
 export function getAllRuntimeProfiles(): RuntimeProfile[] {
   const rows = db
-    .prepare('SELECT * FROM runtime_profiles ORDER BY enabled DESC, priority ASC')
+    .prepare(
+      'SELECT * FROM runtime_profiles ORDER BY enabled DESC, priority ASC',
+    )
     .all() as RuntimeProfileRow[];
   return rows.map(mapRuntimeProfileRow);
 }
@@ -1317,7 +1440,8 @@ function mapBrowserActionAuditRow(
       taskId: row.owner_task_id || undefined,
       role: row.owner_role,
     },
-    permissionTier: row.permission_tier as BrowserActionAuditEntry['permissionTier'],
+    permissionTier:
+      row.permission_tier as BrowserActionAuditEntry['permissionTier'],
     approvalRequired: row.approval_required === 1,
     approved: row.approved === 1,
     summary: row.summary,
@@ -1326,9 +1450,7 @@ function mapBrowserActionAuditRow(
   };
 }
 
-export function logBrowserActionAudit(
-  entry: BrowserActionAuditEntry,
-): void {
+export function logBrowserActionAudit(entry: BrowserActionAuditEntry): void {
   db.prepare(
     `
     INSERT OR REPLACE INTO browser_action_audit
@@ -1421,9 +1543,9 @@ function mapAuthProfileRow(row: AuthProfileRow): AuthProfile {
 }
 
 export function getAuthProfile(id: string): AuthProfile | undefined {
-  const row = db
-    .prepare('SELECT * FROM auth_profiles WHERE id = ?')
-    .get(id) as AuthProfileRow | undefined;
+  const row = db.prepare('SELECT * FROM auth_profiles WHERE id = ?').get(id) as
+    | AuthProfileRow
+    | undefined;
   return row ? mapAuthProfileRow(row) : undefined;
 }
 
@@ -1615,7 +1737,9 @@ export function getAllProviderCapabilities(): Array<{
   capability: ProviderCapability;
 }> {
   const rows = db
-    .prepare('SELECT * FROM provider_capabilities_cache ORDER BY updated_at DESC')
+    .prepare(
+      'SELECT * FROM provider_capabilities_cache ORDER BY updated_at DESC',
+    )
     .all() as CapabilityRow[];
   return rows
     .map((row) => {
@@ -1646,6 +1770,53 @@ export function deleteProviderCapability(
   );
 }
 
+export function logRuntimeUsage(entry: RuntimeUsageLog): void {
+  const createdAt = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO runtime_usage_logs (
+      group_folder,
+      chat_jid,
+      profile_id,
+      provider,
+      model,
+      trigger_kind,
+      started_at,
+      duration_ms,
+      input_tokens,
+      output_tokens,
+      total_tokens,
+      usage_source,
+      request_count,
+      input_cost_usd,
+      output_cost_usd,
+      total_cost_usd,
+      notes,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `,
+  ).run(
+    entry.groupFolder,
+    entry.chatJid,
+    entry.profileId || null,
+    entry.provider,
+    entry.model,
+    entry.triggerKind,
+    entry.startedAt,
+    entry.durationMs,
+    entry.usage.inputTokens,
+    entry.usage.outputTokens,
+    entry.usage.totalTokens,
+    entry.usage.source,
+    entry.usage.requests || null,
+    entry.inputCostUsd,
+    entry.outputCostUsd,
+    entry.totalCostUsd,
+    entry.notes || null,
+    createdAt,
+  );
+}
+
 // --- Tool service profiles/state ---
 
 interface ToolServiceProfileRow {
@@ -1670,7 +1841,9 @@ interface ToolServiceStateRow {
   updated_at: string;
 }
 
-function mapToolServiceProfileRow(row: ToolServiceProfileRow): ToolServiceProfile {
+function mapToolServiceProfileRow(
+  row: ToolServiceProfileRow,
+): ToolServiceProfile {
   return {
     id: row.id,
     name: row.name,
@@ -1696,7 +1869,9 @@ function mapToolServiceStateRow(row: ToolServiceStateRow): ToolServiceState {
   };
 }
 
-export function getToolServiceProfile(id: string): ToolServiceProfile | undefined {
+export function getToolServiceProfile(
+  id: string,
+): ToolServiceProfile | undefined {
   const row = db
     .prepare('SELECT * FROM tool_service_profiles WHERE id = ?')
     .get(id) as ToolServiceProfileRow | undefined;
@@ -1742,7 +1917,9 @@ export function deleteToolServiceProfile(id: string): void {
   db.prepare('DELETE FROM tool_service_profiles WHERE id = ?').run(id);
 }
 
-export function getToolServiceState(serviceId: string): ToolServiceState | undefined {
+export function getToolServiceState(
+  serviceId: string,
+): ToolServiceState | undefined {
   const row = db
     .prepare('SELECT * FROM tool_service_state WHERE service_id = ?')
     .get(serviceId) as ToolServiceStateRow | undefined;
@@ -1814,9 +1991,7 @@ export function getWizardSession(
   return row ? mapWizardSessionRow(row) : undefined;
 }
 
-export function getLatestActiveWizardSession():
-  | WizardSessionState
-  | undefined {
+export function getLatestActiveWizardSession(): WizardSessionState | undefined {
   const row = db
     .prepare(
       `
@@ -1972,7 +2147,15 @@ export interface MemoryEntryInput {
   kind: string;
   content: string;
   source: 'auto' | 'explicit' | 'migration';
+  origin?:
+    | 'conversation'
+    | 'explicit_request'
+    | 'migration'
+    | 'file_compaction';
+  durability?: 'session' | 'durable' | 'pinned';
+  confidence?: number;
   created_at: string;
+  last_confirmed_at?: string;
   source_file?: string;
   pinned?: boolean;
 }
@@ -1982,9 +2165,14 @@ export interface MemoryEntry {
   content: string;
   kind: string;
   source: string;
+  origin: string;
+  durability: string;
+  confidence: number;
   rank: number;
   pinned: number;
   created_at?: string;
+  last_confirmed_at?: string;
+  superseded_at?: string;
 }
 
 const MEMORY_DECAY_HALF_LIFE_DAYS = 30;
@@ -1997,29 +2185,189 @@ function normalizeMemoryContent(content: string): string {
     .trim();
 }
 
+function clampConfidence(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0.1, Math.min(1, value as number));
+}
+
+function memoryConflictKey(kind: string, content: string): string | null {
+  const normalized = normalizeMemoryContent(content);
+  const patterns: Array<{ key: string; test: RegExp }> = [
+    { key: 'profile:name', test: /\b(preferred name|call me|my name is)\b/ },
+    { key: 'profile:timezone', test: /\btimezone|time zone|ist|utc|gmt\b/ },
+    { key: 'profile:location', test: /\b(i live|located|based in)\b/ },
+    {
+      key: 'profile:role',
+      test: /\b(i work as|i am a|my role is|working at)\b/,
+    },
+    {
+      key: 'employment:status',
+      test: /\b(job|working from|start working|joined|offer|startup company|employment)\b/,
+    },
+  ];
+  for (const pattern of patterns) {
+    if (pattern.test.test(normalized)) {
+      return `${kind}:${pattern.key}`;
+    }
+  }
+  return null;
+}
+
+function resolveMemoryOrigin(
+  entry: MemoryEntryInput,
+): NonNullable<MemoryEntryInput['origin']> {
+  if (entry.origin) return entry.origin;
+  if (entry.source === 'explicit') return 'explicit_request';
+  if (entry.source === 'migration') return 'migration';
+  return 'conversation';
+}
+
+function resolveMemoryDurability(
+  entry: MemoryEntryInput,
+): NonNullable<MemoryEntryInput['durability']> {
+  if (entry.pinned) return 'pinned';
+  if (entry.durability) return entry.durability;
+  return entry.source === 'migration' ? 'durable' : 'durable';
+}
+
+function rankMemoryRows(
+  rows: MemoryEntry[],
+  keywords: string[],
+  limit: number,
+): MemoryEntry[] {
+  const now = Date.now();
+  return rows
+    .map((row) => {
+      const ageMs =
+        now -
+        new Date(row.last_confirmed_at || row.created_at || now).getTime();
+      const ageDays = Math.max(0, ageMs / 86_400_000);
+      const decay = Math.exp(
+        (-Math.LN2 * ageDays) / MEMORY_DECAY_HALF_LIFE_DAYS,
+      );
+      const lower = row.content.toLowerCase();
+      const exactMatches = keywords.reduce(
+        (count, keyword) =>
+          count + (lower.includes(keyword.toLowerCase()) ? 1 : 0),
+        0,
+      );
+      const pinnedBoost = row.pinned ? -2.5 : 0;
+      const explicitBoost = row.origin === 'explicit_request' ? -0.8 : 0;
+      const durableBoost =
+        row.durability === 'pinned'
+          ? -1.2
+          : row.durability === 'durable'
+            ? -0.35
+            : 0;
+      const confidenceBoost = -(row.confidence || 0.7) * 0.6;
+      const exactBoost = -Math.min(2.2, exactMatches * 0.45);
+      return {
+        ...row,
+        rank:
+          row.rank * decay +
+          pinnedBoost +
+          explicitBoost +
+          durableBoost +
+          confidenceBoost +
+          exactBoost,
+      };
+    })
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, limit);
+}
+
 /** Insert a memory entry, deduplicating by normalized content within the group.
  *  If an entry with the same normalized content exists and the new entry is pinned,
  *  upgrades the existing entry to pinned. */
 export function insertMemoryEntry(entry: MemoryEntryInput): number {
   const normalized = normalizeMemoryContent(entry.content);
+  const origin = resolveMemoryOrigin(entry);
+  const durability = resolveMemoryDurability(entry);
+  const confidence = clampConfidence(
+    entry.confidence,
+    origin === 'explicit_request' ? 0.95 : 0.78,
+  );
+  const lastConfirmedAt = entry.last_confirmed_at || entry.created_at;
   const existing = db
     .prepare(
-      'SELECT id, pinned FROM memory_entries WHERE group_folder = ? AND content_normalized = ?',
+      `SELECT id, pinned, confidence
+       FROM memory_entries
+       WHERE group_folder = ? AND content_normalized = ? AND superseded_at IS NULL`,
     )
-    .get(entry.group_folder, normalized) as { id: number; pinned: number } | undefined;
+    .get(entry.group_folder, normalized) as
+    | { id: number; pinned: number; confidence: number }
+    | undefined;
 
   if (existing) {
-    // Upgrade to pinned if new entry requests it
     if (entry.pinned && !existing.pinned) {
-      db.prepare('UPDATE memory_entries SET pinned = 1 WHERE id = ?').run(existing.id);
+      db.prepare(
+        `UPDATE memory_entries
+         SET pinned = 1,
+             durability = 'pinned',
+             origin = ?,
+             confidence = MAX(confidence, ?),
+             last_confirmed_at = ?
+         WHERE id = ?`,
+      ).run(origin, confidence, lastConfirmedAt, existing.id);
+    } else {
+      db.prepare(
+        `UPDATE memory_entries
+         SET confidence = MAX(confidence, ?),
+             last_confirmed_at = COALESCE(?, last_confirmed_at)
+         WHERE id = ?`,
+      ).run(confidence, lastConfirmedAt, existing.id);
     }
     return existing.id;
   }
 
+  const conflictKey = memoryConflictKey(entry.kind, entry.content);
+  if (conflictKey) {
+    const conflictingIds = (
+      db
+        .prepare(
+          `SELECT id, content
+           FROM memory_entries
+           WHERE group_folder = ?
+             AND kind = ?
+             AND superseded_at IS NULL`,
+        )
+        .all(entry.group_folder, entry.kind) as Array<{
+        id: number;
+        content: string;
+      }>
+    )
+      .filter(
+        (row) => memoryConflictKey(entry.kind, row.content) === conflictKey,
+      )
+      .map((row) => row.id);
+
+    for (const id of conflictingIds) {
+      db.prepare(
+        `UPDATE memory_entries
+         SET superseded_at = ?
+         WHERE id = ?`,
+      ).run(entry.created_at, id);
+    }
+  }
+
   const result = db
     .prepare(
-      `INSERT INTO memory_entries (group_folder, scope, kind, content, content_normalized, source, created_at, source_file, pinned)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO memory_entries (
+         group_folder,
+         scope,
+         kind,
+         content,
+         content_normalized,
+         source,
+         origin,
+         durability,
+         confidence,
+         created_at,
+         last_confirmed_at,
+         source_file,
+         pinned
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       entry.group_folder,
@@ -2028,11 +2376,44 @@ export function insertMemoryEntry(entry: MemoryEntryInput): number {
       entry.content,
       normalized,
       entry.source,
+      origin,
+      durability,
+      confidence,
       entry.created_at,
+      lastConfirmedAt,
       entry.source_file ?? null,
       entry.pinned ? 1 : 0,
     );
   return result.lastInsertRowid as number;
+}
+
+export function queryMemoryExact(input: {
+  groupFolder: string;
+  phrases: string[];
+  limit?: number;
+}): MemoryEntry[] {
+  const phrases = input.phrases
+    .map((phrase) => normalizeMemoryContent(phrase))
+    .filter((phrase) => phrase.length >= 4);
+  if (phrases.length === 0) return [];
+
+  const rows = db
+    .prepare(
+      `SELECT id, content, kind, source, origin, durability, confidence, pinned, created_at, last_confirmed_at, superseded_at, 0 AS rank
+       FROM memory_entries
+       WHERE (group_folder = ? OR scope = 'global')
+         AND superseded_at IS NULL`,
+    )
+    .all(input.groupFolder) as MemoryEntry[];
+
+  const matches = rows.filter((row) => {
+    const normalized = normalizeMemoryContent(row.content);
+    return phrases.some(
+      (phrase) => normalized.includes(phrase) || phrase.includes(normalized),
+    );
+  });
+
+  return rankMemoryRows(matches, phrases, input.limit ?? 8);
 }
 
 /** Query FTS5 memory index with BM25 ranking. Returns best matches first. */
@@ -2041,13 +2422,15 @@ export function queryMemoryFts(input: {
   keywords: string[];
   limit?: number;
 }): MemoryEntry[] {
-  if (input.keywords.length === 0) return [];
+  const keywords = input.keywords
+    .map((keyword) => normalizeMemoryContent(keyword))
+    .filter((keyword) => keyword.length >= 3);
+  if (keywords.length === 0) return [];
 
-  // Escape FTS5 special chars and build MATCH expression
-  const terms = input.keywords
-    .map((kw) => kw.replace(/["*^]/g, '').trim())
+  const terms = keywords
+    .map((keyword) => keyword.replace(/["*^]/g, '').trim())
     .filter(Boolean)
-    .map((kw) => (kw.includes(' ') ? `"${kw}"` : kw));
+    .map((keyword) => (keyword.includes(' ') ? `"${keyword}"` : keyword));
 
   if (terms.length === 0) return [];
   const matchExpr = terms.join(' OR ');
@@ -2057,34 +2440,35 @@ export function queryMemoryFts(input: {
     // Boost 'explicit' source entries by 1.5x (BM25 rank is negative; multiplying
     // by 1.5 makes it more negative = ranks higher). Pinned entries are excluded
     // here — they are always fetched separately via getPinnedMemoryEntries().
-    const now = Date.now();
-    return (db
+    const rows = db
       .prepare(
-        `SELECT me.id, me.content, me.kind, me.source, me.pinned, me.created_at,
+        `SELECT me.id,
+                me.content,
+                me.kind,
+                me.source,
+                me.origin,
+                me.durability,
+                me.confidence,
+                me.pinned,
+                me.created_at,
+                me.last_confirmed_at,
+                me.superseded_at,
                 (memory_fts.rank * CASE WHEN me.source = 'explicit' THEN 1.5 ELSE 1.0 END) AS rank
          FROM memory_fts
          JOIN memory_entries me ON memory_fts.rowid = me.id
          WHERE memory_fts MATCH ?
            AND (me.group_folder = ? OR me.scope = 'global')
            AND me.pinned = 0
+           AND me.superseded_at IS NULL
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(matchExpr, input.groupFolder, limit) as MemoryEntry[])
-      .map((row) => {
-        const ageMs = now - new Date(row.created_at || now).getTime();
-        const ageDays = Math.max(0, ageMs / 86_400_000);
-        // BM25 rank is negative. Multiplying by decay < 1 makes stale matches
-        // less negative, so they fall lower in the ascending rank sort.
-        const decay = Math.exp(
-          (-Math.LN2 * ageDays) / MEMORY_DECAY_HALF_LIFE_DAYS,
-        );
-        return {
-          ...row,
-          rank: row.rank * decay,
-        };
-      })
-      .sort((a, b) => a.rank - b.rank);
+      .all(
+        matchExpr,
+        input.groupFolder,
+        Math.max(limit * 2, limit),
+      ) as MemoryEntry[];
+    return rankMemoryRows(rows, keywords, limit);
   } catch {
     // FTS5 MATCH can throw on malformed expressions — return empty gracefully
     return [];
@@ -2095,7 +2479,10 @@ export function queryMemoryFts(input: {
 export function getMemoryEntryCount(groupFolder: string): number {
   const row = db
     .prepare(
-      'SELECT COUNT(*) as c FROM memory_entries WHERE group_folder = ?',
+      `SELECT COUNT(*) as c
+       FROM memory_entries
+       WHERE group_folder = ?
+         AND superseded_at IS NULL`,
     )
     .get(groupFolder) as { c: number };
   return row.c;
@@ -2106,9 +2493,22 @@ export function getMemoryEntryCount(groupFolder: string): number {
 export function getPinnedMemoryEntries(groupFolder: string): MemoryEntry[] {
   return db
     .prepare(
-      `SELECT id, content, kind, source, pinned, 0 AS rank
+      `SELECT id,
+              content,
+              kind,
+              source,
+              origin,
+              durability,
+              confidence,
+              pinned,
+              created_at,
+              last_confirmed_at,
+              superseded_at,
+              0 AS rank
        FROM memory_entries
-       WHERE group_folder = ? AND pinned = 1
+       WHERE group_folder = ?
+         AND pinned = 1
+         AND superseded_at IS NULL
        ORDER BY created_at DESC
        LIMIT 5`,
     )
@@ -2117,9 +2517,7 @@ export function getPinnedMemoryEntries(groupFolder: string): MemoryEntry[] {
 
 /** Delete all non-explicit entries for a group and re-insert from current MD files. */
 export function clearNonExplicitMemoryEntries(groupFolder: string): void {
-  db
-    .prepare(
-      `DELETE FROM memory_entries WHERE group_folder = ? AND source != 'explicit'`,
-    )
-    .run(groupFolder);
+  db.prepare(
+    `DELETE FROM memory_entries WHERE group_folder = ? AND source != 'explicit'`,
+  ).run(groupFolder);
 }

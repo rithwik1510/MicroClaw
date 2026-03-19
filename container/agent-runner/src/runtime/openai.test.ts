@@ -7,12 +7,14 @@ import type { RuntimeRequest } from './types.js';
 import { OpenAIRuntimeAdapter } from './openai.js';
 
 const mockPostJson = vi.fn();
+const mockPostJsonStream = vi.fn();
 const mockExecuteWebSearch = vi.fn();
 const mockCloseWebSession = vi.fn(async () => undefined);
 const mockCloseBrowserSession = vi.fn(async () => undefined);
 
 vi.mock('./http.js', () => ({
   postJson: (...args: unknown[]) => mockPostJson(...args),
+  postJsonStream: (...args: unknown[]) => mockPostJsonStream(...args),
   makeSessionId: () => 'session-test',
 }));
 
@@ -94,6 +96,7 @@ describe('OpenAIRuntimeAdapter', () => {
 
   beforeEach(() => {
     mockPostJson.mockReset();
+    mockPostJsonStream.mockReset();
     mockExecuteWebSearch.mockReset();
     mockCloseWebSession.mockClear();
     mockCloseBrowserSession.mockClear();
@@ -124,6 +127,93 @@ describe('OpenAIRuntimeAdapter', () => {
 
     expect(mockExecuteWebSearch).not.toHaveBeenCalled();
     expect(res.result).toContain('web search limit');
+  });
+
+  it('returns provider usage when chat completions exposes token counts', async () => {
+    mockPostJson.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: 'Latest AI news is moving quickly.',
+            tool_calls: [],
+          },
+        },
+      ],
+      usage: {
+        prompt_tokens: 123,
+        completion_tokens: 45,
+        total_tokens: 168,
+      },
+    });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    const res = await adapter.run(baseRequest());
+
+    expect(res.usage).toEqual({
+      inputTokens: 123,
+      outputTokens: 45,
+      totalTokens: 168,
+      source: 'provider',
+      requests: 1,
+    });
+  });
+
+  it('streams plain conversational text when streaming is supported', async () => {
+    mockPostJsonStream.mockImplementationOnce(
+      async (
+        _url: string,
+        _body: unknown,
+        _headers: Record<string, string>,
+        onEvent: (payload: unknown) => Promise<void>,
+      ) => {
+        await onEvent({
+          choices: [{ delta: { content: 'Hello' } }],
+        });
+        await onEvent({
+          choices: [{ delta: { content: ' there' } }],
+        });
+        await onEvent({
+          choices: [{ delta: {} }],
+          usage: {
+            prompt_tokens: 20,
+            completion_tokens: 5,
+            total_tokens: 25,
+          },
+        });
+      },
+    );
+
+    const partials: string[] = [];
+    const adapter = new OpenAIRuntimeAdapter();
+    const res = await adapter.run(
+      baseRequest({
+        prompt: 'hello there',
+        config: {
+          ...baseRequest().config,
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          capabilities: {
+            ...baseRequest().config.capabilities!,
+            supportsTools: false,
+            supportsStreaming: true,
+          },
+        },
+        onPartialText: async (text) => {
+          partials.push(text);
+        },
+      }),
+    );
+
+    expect(mockPostJsonStream).toHaveBeenCalledTimes(1);
+    expect(mockPostJson).not.toHaveBeenCalled();
+    expect(partials.join('')).toBe('Hello there');
+    expect(res.result).toBe('Hello there');
+    expect(res.usage).toEqual({
+      inputTokens: 20,
+      outputTokens: 5,
+      totalTokens: 25,
+      source: 'provider',
+      requests: 1,
+    });
   });
 
   it('keeps conversational output when the model answers without calling web tools', async () => {
@@ -847,6 +937,99 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(joined).toContain('hello there from the current turn');
   });
 
+  it('lets cloud plain-response turns use the full max token budget when no tool calls are made', async () => {
+    mockPostJson.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: 'Detailed answer.',
+            tool_calls: [],
+          },
+        },
+      ],
+    });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    const res = await adapter.run(
+      baseRequest({
+        prompt: 'hello there',
+        secrets: {
+          ...baseRequest().secrets,
+          OPENAI_MAX_OUTPUT_TOKENS: '2048',
+        },
+        config: withCapabilityRoute(
+          {
+            ...baseRequest().config,
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+          },
+          'plain_response',
+        ),
+      }),
+    );
+
+    expect(res.result).toBe('Detailed answer.');
+    expect(mockPostJson).toHaveBeenNthCalledWith(
+      1,
+      'https://api.deepinfra.com/v1/openai/chat/completions',
+      expect.objectContaining({
+        max_tokens: 2048,
+      }),
+      expect.any(Object),
+      expect.any(Number),
+    );
+  });
+
+  it('uses looser cloud-safe sanitization while redacting sensitive runtime details', async () => {
+    mockPostJson.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: 'Cloud ready.',
+            tool_calls: [],
+          },
+        },
+      ],
+    });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    await adapter.run(
+      baseRequest({
+        prompt: 'hello there',
+        systemPrompt: [
+          '## Your workspace',
+          'Work from C:\\Users\\posan\\OneDrive\\Desktop\\RIA BOT\\nanoclaw and keep the current task context.',
+          '',
+          '## Admin context',
+          'OPENAI_API_KEY=super-secret-key',
+          '',
+          '## Identity',
+          'You are a warm, collaborative assistant.',
+        ].join('\n'),
+        config: withCapabilityRoute(
+          {
+            ...baseRequest().config,
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+          },
+          'plain_response',
+        ),
+      }),
+    );
+
+    const payload = mockPostJson.mock.calls[0][1] as {
+      messages: Array<{ role: string; content?: string }>;
+    };
+    const joined = payload.messages
+      .map((message) => message.content || '')
+      .join('\n');
+    expect(joined).toContain('You are a warm, collaborative assistant.');
+    expect(joined).toContain('[redacted-path]');
+    expect(joined).not.toContain('super-secret-key');
+    expect(joined).not.toContain('OPENAI_API_KEY');
+    expect(joined).not.toContain(
+      'C:\\Users\\posan\\OneDrive\\Desktop\\RIA BOT\\nanoclaw',
+    );
+  });
+
   it('strips think blocks from direct model replies', async () => {
     mockPostJson.mockResolvedValueOnce({
       choices: [
@@ -1500,12 +1683,12 @@ describe('OpenAIRuntimeAdapter', () => {
       3,
       'http://localhost:1234/v1/chat/completions',
       expect.objectContaining({
-        max_tokens: 500,
+        max_tokens: 1400,
         messages: expect.arrayContaining([
           expect.objectContaining({
             role: 'user',
             content: expect.stringContaining(
-              'Summarize the completed tool results for the user',
+              'Synthesize the completed tool results into a clear, comprehensive response',
             ),
           }),
         ]),
@@ -1590,6 +1773,75 @@ describe('OpenAIRuntimeAdapter', () => {
             ),
           }),
         ]),
+      }),
+      expect.any(Object),
+      expect.any(Number),
+    );
+  });
+
+  it('keeps the first cloud tool-loop completion bounded before any tool calls', async () => {
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'tool-1',
+                  type: 'function',
+                  function: {
+                    name: 'browser_open_url',
+                    arguments: JSON.stringify({ url: 'https://vibelevel.ai' }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: 'I opened the target site.',
+              tool_calls: [],
+            },
+          },
+        ],
+      });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    const res = await adapter.run(
+      baseRequest({
+        prompt: 'log into the dashboard of vibelevel.ai and check what their product is about',
+        config: {
+          provider: 'openai_compatible',
+          model: 'test-model',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          capabilityRoute: 'browser_operation',
+          toolPolicy: {
+            web: { enabled: true },
+            browser: { enabled: true },
+          },
+          capabilities: {
+            supportsResponses: false,
+            supportsChatCompletions: true,
+            supportsTools: true,
+            supportsStreaming: false,
+            requiresApiKey: false,
+            checkedAt: new Date().toISOString(),
+          },
+        },
+      }),
+    );
+
+    expect(res.result).toContain('opened the target site');
+    expect(mockPostJson).toHaveBeenNthCalledWith(
+      1,
+      'https://api.deepinfra.com/v1/openai/chat/completions',
+      expect.objectContaining({
+        max_tokens: 900,
       }),
       expect.any(Object),
       expect.any(Number),

@@ -1,0 +1,1 @@
+{"version":3,"file":"fallback-agent-browser.d.ts","sourceRoot":"","sources":["fallback-agent-browser.ts"],"names":[],"mappings":"AAiBA,wBAAsB,uBAAuB,CAAC,KAAK,EAAE;IACnD,MAAM,EAAE,MAAM,CAAC;IACf,GAAG,CAAC,EAAE,MAAM,CAAC;IACb,KAAK,CAAC,EAAE,MAAM,CAAC;IACf,SAAS,EAAE,MAAM,CAAC;CACnB,GAAG,OAAO,CAAC;IAAE,EAAE,EAAE,OAAO,CAAC;IAAC,OAAO,EAAE,MAAM,CAAA;CAAE,CAAC,CAsC5C"}
