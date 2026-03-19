@@ -365,8 +365,7 @@ function syncPinnedCoreMemory(groupFolder: string): number {
       confidence: 0.98,
       created_at: now,
       last_confirmed_at: now,
-      source_file:
-        candidate.kind === 'proj' ? memoryPath : userPath,
+      source_file: candidate.kind === 'proj' ? memoryPath : userPath,
       pinned: true,
     });
     inserted++;

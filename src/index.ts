@@ -1287,7 +1287,8 @@ async function startMessageLoop(): Promise<void> {
 
           const isMainGroup = group.isMain === true;
           const isDmChat = /dm/i.test(group.folder);
-          const needsTrigger = !isMainGroup && !isDmChat && group.requiresTrigger !== false;
+          const needsTrigger =
+            !isMainGroup && !isDmChat && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
