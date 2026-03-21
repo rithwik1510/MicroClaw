@@ -2965,6 +2965,35 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               'OpenAI-compatible runtime returned no text output from streaming chat completions',
             );
           }
+          // If the model said "let me search / one moment" instead of calling a tool,
+          // run a forced web prefetch even on the non-tool-loop path.
+          if (
+            webEnabled &&
+            !schedulingIntent &&
+            !watchIntent &&
+            this.looksLikeStaleKnowledgeFallback(streamedText)
+          ) {
+            const forcedToolCtx = this.webConfig(req);
+            try {
+              const prefetched = await this.runForcedWebPrefetch({
+                req,
+                toolCtx: forcedToolCtx,
+                model,
+                baseUrl,
+                authHeaders,
+                requestTimeoutMs: Math.min(requestTimeoutMs, 20_000),
+                maxOutputTokens: Math.min(maxOutputTokens, 800),
+                usage,
+              });
+              if (!this.looksLikeContextRefusal(prefetched)) {
+                return buildResponse(stripThinkBlocks(prefetched));
+              }
+            } catch {
+              // prefetch failed — fall through and return streamed text as-is
+            } finally {
+              await closeWebSessionFromContext(forcedToolCtx).catch(() => undefined);
+            }
+          }
           return buildResponse(streamedText);
         } catch (err) {
           if (sawPartial) throw err;
