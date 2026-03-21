@@ -219,9 +219,14 @@ export async function ensurePage(input: {
   }
 
   if (!state.browser) {
+    const executablePath =
+      process.env.PLAYWRIGHT_EXECUTABLE_PATH ||
+      process.env.CHROME_EXECUTABLE_PATH ||
+      undefined;
     state.browser = await chromium.launch({
       headless: true,
       timeout: input.timeoutMs,
+      ...(executablePath ? { executablePath } : {}),
     });
   }
   if (!state.context) {
