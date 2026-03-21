@@ -44,7 +44,8 @@
       "Bash(curl:*)",
       "Bash(taskkill /PID 2816 /F)",
       "Bash(taskkill /PID 27412 /F)",
-      "Bash(cmd //c \"taskkill /PID 2816 /F\")"
+      "Bash(cmd //c \"taskkill /PID 2816 /F\")",
+      "Bash(grep -n \"buildContextPrompt\\\\|getContextLines\" container/agent-runner/src/runtime/*.ts)"
     ]
   }
 }
