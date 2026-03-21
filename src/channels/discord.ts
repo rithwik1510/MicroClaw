@@ -69,6 +69,7 @@ export class DiscordChannel implements Channel {
   private opts: DiscordChannelOpts;
   private botToken: string;
   private unregisteredNoticeAt = new Map<string, number>();
+  private lastEditAt = new Map<string, number>();
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -397,6 +398,41 @@ export class DiscordChannel implements Channel {
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
       return null;
+    }
+  }
+
+  async updateMessage(
+    jid: string,
+    ref: ChannelMessageRef,
+    text: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    // Rate-limit edits to ~1 per second per channel to stay within Discord limits.
+    const now = Date.now();
+    const last = this.lastEditAt.get(jid) || 0;
+    if (now - last < 900) return;
+    this.lastEditAt.set(jid, now);
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) return;
+      const msg = await (channel as TextChannel).messages.fetch(ref.id);
+      await msg.edit(text.slice(0, 1990));
+    } catch (err) {
+      logger.debug({ jid, err }, 'Failed to edit Discord streaming message');
+    }
+  }
+
+  async deleteMessage(jid: string, ref: ChannelMessageRef): Promise<void> {
+    if (!this.client) return;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) return;
+      const msg = await (channel as TextChannel).messages.fetch(ref.id);
+      await msg.delete();
+    } catch (err) {
+      logger.debug({ jid, err }, 'Failed to delete Discord streaming message');
     }
   }
 
