@@ -97,7 +97,19 @@ const IPC_INPUT_DIR = process.env.NANOCLAW_IPC_INPUT_DIR || '/workspace/ipc/inpu
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = Math.max(
   50,
-  Number.parseInt(process.env.NANOCLAW_AGENT_IPC_POLL_MS || '200', 10) || 200,
+  Number.parseInt(process.env.NANOCLAW_AGENT_IPC_POLL_MS || '100', 10) || 100,
+);
+
+// Maximum warm-session history to keep in memory. Prevents unbounded context
+// growth which increases TTFT linearly with conversation length.
+// Each "pair" is one user turn + one assistant turn.
+const MAX_PRIOR_PAIRS = Math.max(
+  1,
+  Number.parseInt(process.env.OPENAI_MAX_PRIOR_TURNS || '10', 10) || 10,
+);
+const MAX_PRIOR_CHARS = Math.max(
+  2000,
+  Number.parseInt(process.env.OPENAI_MAX_PRIOR_CHARS || '16000', 10) || 16000,
 );
 
 /**
@@ -685,6 +697,21 @@ async function runExternalRuntimeQuery(
         { role: 'user', content: prompt },
         { role: 'assistant', content: response.result },
       ];
+
+      // Trim priorMessages to prevent unbounded context growth.
+      // Keep the most recent MAX_PRIOR_PAIRS pairs, staying within the char budget.
+      // Remove oldest pairs first (always in user+assistant units of 2).
+      while (sessionState.priorMessages.length > MAX_PRIOR_PAIRS * 2) {
+        sessionState.priorMessages.splice(0, 2);
+      }
+      let priorChars = sessionState.priorMessages.reduce(
+        (sum, m) => sum + m.content.length,
+        0,
+      );
+      while (priorChars > MAX_PRIOR_CHARS && sessionState.priorMessages.length >= 2) {
+        const removed = sessionState.priorMessages.splice(0, 2);
+        priorChars -= removed[0].content.length + removed[1].content.length;
+      }
 
       // Carry the session ID forward so it stays stable across warm turns.
       if (response.sessionId) {
