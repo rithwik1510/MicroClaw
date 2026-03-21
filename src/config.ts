@@ -25,7 +25,7 @@ export const ASSISTANT_HAS_OWN_NUMBER =
     envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = parsePositiveInt(
   process.env.NANOCLAW_POLL_INTERVAL_MS || envConfig.NANOCLAW_POLL_INTERVAL_MS,
-  800,
+  400,
 );
 export const SCHEDULER_POLL_INTERVAL = 60000;
 export const HEARTBEAT_POLL_INTERVAL = 60000;
@@ -71,7 +71,7 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
 export const IPC_POLL_INTERVAL = parsePositiveInt(
   process.env.NANOCLAW_IPC_POLL_INTERVAL_MS ||
     envConfig.NANOCLAW_IPC_POLL_INTERVAL_MS,
-  400,
+  150,
 );
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
