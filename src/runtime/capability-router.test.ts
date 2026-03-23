@@ -40,4 +40,21 @@ describe('resolveCapabilityRoute', () => {
 
     expect(route).toBe('plain_response');
   });
+
+  it('routes host file requests to the native host-file tool path', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Please list the files in my Desktop folder and open the newest notes file.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: {
+        web: { enabled: true },
+        browser: { enabled: true },
+      },
+    });
+
+    expect(route).toBe('host_file_operation');
+  });
 });

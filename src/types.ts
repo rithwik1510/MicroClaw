@@ -140,7 +140,13 @@ export interface RetryPolicy {
   timeoutMs: number;
 }
 
-export type RuntimeToolFamily = 'web' | 'memory' | 'docs' | 'browser' | 'meta';
+export type RuntimeToolFamily =
+  | 'web'
+  | 'memory'
+  | 'docs'
+  | 'browser'
+  | 'host_files'
+  | 'meta';
 
 export interface PlannerCriticConfig {
   enabled: boolean;
@@ -148,6 +154,7 @@ export interface PlannerCriticConfig {
 }
 export type CapabilityRoute =
   | 'plain_response'
+  | 'host_file_operation'
   | 'web_lookup'
   | 'browser_operation'
   | 'deny_or_escalate';

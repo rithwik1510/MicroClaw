@@ -28,6 +28,18 @@ import {
   executeWebOpenUrl,
   executeWebSearch,
 } from './web/actions.js';
+import {
+  executeCopyHostPath,
+  executeEditHostFile,
+  executeGlobHostFiles,
+  executeGrepHostFiles,
+  executeListHostDirectories,
+  executeListHostEntries,
+  executeMakeHostDirectory,
+  executeMoveHostPath,
+  executeReadHostFile,
+  executeWriteHostFile,
+} from './host-files.js';
 
 export function buildToolRegistry(): ToolHandler[] {
   return [
@@ -237,6 +249,169 @@ export function buildToolRegistry(): ToolHandler[] {
         additionalProperties: false,
       },
       execute: executeWebClose,
+    },
+    {
+      name: 'list_host_directories',
+      family: 'host_files',
+      description:
+        'List the host computer directories currently allowed for file access. Always call this first on a host-file task unless you already have a confirmed allowed path from this conversation.',
+      schema: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+      execute: executeListHostDirectories,
+    },
+    {
+      name: 'list_host_entries',
+      family: 'host_files',
+      description:
+        'List files and folders inside an allowed host directory.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          recursive: { type: 'boolean' },
+          limit: { type: 'number' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+      execute: executeListHostEntries,
+    },
+    {
+      name: 'read_host_file',
+      family: 'host_files',
+      description:
+        'Read text from a file inside an allowed host directory.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          start_line: { type: 'number' },
+          max_lines: { type: 'number' },
+          max_chars: { type: 'number' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+      execute: executeReadHostFile,
+    },
+    {
+      name: 'write_host_file',
+      family: 'host_files',
+      description:
+        'Create or overwrite a text file inside an allowed writable host directory.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+          mode: { type: 'string', enum: ['create', 'overwrite'] },
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      },
+      execute: executeWriteHostFile,
+    },
+    {
+      name: 'edit_host_file',
+      family: 'host_files',
+      description:
+        'Edit a text file inside an allowed writable host directory by replacing exact text.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          search: { type: 'string' },
+          replace: { type: 'string' },
+          replace_all: { type: 'boolean' },
+        },
+        required: ['path', 'search', 'replace'],
+        additionalProperties: false,
+      },
+      execute: executeEditHostFile,
+    },
+    {
+      name: 'glob_host_files',
+      family: 'host_files',
+      description:
+        'Find files under an allowed host directory using a glob pattern.',
+      schema: {
+        type: 'object',
+        properties: {
+          base_path: { type: 'string' },
+          pattern: { type: 'string' },
+          limit: { type: 'number' },
+        },
+        required: ['base_path', 'pattern'],
+        additionalProperties: false,
+      },
+      execute: executeGlobHostFiles,
+    },
+    {
+      name: 'grep_host_files',
+      family: 'host_files',
+      description:
+        'Search text inside files under an allowed host directory.',
+      schema: {
+        type: 'object',
+        properties: {
+          base_path: { type: 'string' },
+          query: { type: 'string' },
+          limit: { type: 'number' },
+        },
+        required: ['base_path', 'query'],
+        additionalProperties: false,
+      },
+      execute: executeGrepHostFiles,
+    },
+    {
+      name: 'make_host_directory',
+      family: 'host_files',
+      description:
+        'Create a directory inside an allowed writable host directory.',
+      schema: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+        },
+        required: ['path'],
+        additionalProperties: false,
+      },
+      execute: executeMakeHostDirectory,
+    },
+    {
+      name: 'move_host_path',
+      family: 'host_files',
+      description:
+        'Move or rename a file or folder inside allowed writable host directories.',
+      schema: {
+        type: 'object',
+        properties: {
+          from: { type: 'string' },
+          to: { type: 'string' },
+        },
+        required: ['from', 'to'],
+        additionalProperties: false,
+      },
+      execute: executeMoveHostPath,
+    },
+    {
+      name: 'copy_host_path',
+      family: 'host_files',
+      description:
+        'Copy a file or folder from one allowed host directory path to another.',
+      schema: {
+        type: 'object',
+        properties: {
+          from: { type: 'string' },
+          to: { type: 'string' },
+        },
+        required: ['from', 'to'],
+        additionalProperties: false,
+      },
+      execute: executeCopyHostPath,
     },
     {
       name: 'remember_this',
@@ -527,7 +702,13 @@ export function filterToolRegistry(
     ) {
       return false;
     }
-    if (tool.family === 'meta' || tool.family === 'memory') return true;
+    if (
+      tool.family === 'meta' ||
+      tool.family === 'memory' ||
+      tool.family === 'host_files'
+    ) {
+      return true;
+    }
     const familyPolicy =
       tool.family === 'web'
         ? toolPolicy?.web

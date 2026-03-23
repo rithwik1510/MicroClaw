@@ -17,6 +17,18 @@ function hasBrowserActionRequest(text: string): boolean {
   );
 }
 
+function hasExplicitHostPath(text: string): boolean {
+  return /([a-z]:\\|[a-z]:\/|~[\\/]|\/users\/|\/home\/|\\\\)/i.test(text);
+}
+
+function hasHostFileRequest(text: string): boolean {
+  return /\b(file|files|folder|folders|directory|directories|desktop|documents|downloads|onedrive|path|paths|workspace|computer files)\b/i.test(
+    text,
+  ) && /\b(list|show|open|read|write|edit|create|make|save|update|change|rename|move|copy|search|find|grep|glob|organize)\b/i.test(
+    text,
+  );
+}
+
 function hasWebLookupRequest(text: string): boolean {
   return /\b(latest|current|today|recent|news|source|sources|cite|citation|verify|verification|fact-check|price|release|update|search|lookup|look up|browse the web|find online|check online|read this page|summarize this page|fetch this)\b/i.test(
     text,
@@ -110,6 +122,10 @@ export function resolveCapabilityRoute(input: {
     return 'plain_response';
   }
 
+  if (hasExplicitHostPath(current) || hasHostFileRequest(current)) {
+    return 'host_file_operation';
+  }
+
   const browserIntent =
     browserEnabled &&
     (hasBrowserActionRequest(current) ||
@@ -132,6 +148,8 @@ export function resolveCapabilityRoute(input: {
 
 export function capabilityRouteSummary(route: CapabilityRoute): string {
   switch (route) {
+    case 'host_file_operation':
+      return 'Native host-file tools allowed for this turn.';
     case 'browser_operation':
       return 'Interactive browser operation allowed for this turn.';
     case 'web_lookup':

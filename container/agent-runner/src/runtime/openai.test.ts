@@ -268,6 +268,36 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(names).not.toContain('critique_response');
   });
 
+  it('removes scheduling tools from ordinary plain-response turns', async () => {
+    mockPostJson.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: 'Hello there.',
+            tool_calls: [],
+          },
+        },
+      ],
+    });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    await adapter.run(
+      baseRequest({
+        prompt: 'hi',
+        config: withCapabilityRoute(baseRequest().config, 'plain_response'),
+      }),
+    );
+
+    const payload = mockPostJson.mock.calls[0]?.[1] as {
+      tools?: Array<{ function?: { name?: string } }>;
+    };
+    const names = toolNamesFromPayload(payload);
+    expect(names).toContain('remember_this');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
+  });
+
   it('forces future live-work prompts through scheduling tools before allowing a final answer', async () => {
     mockPostJson
       .mockResolvedValueOnce({
@@ -332,13 +362,6 @@ describe('OpenAIRuntimeAdapter', () => {
       tools?: Array<{ function?: { name?: string } }>;
       tool_choice?: unknown;
     };
-    const systemMessage = firstPayload.messages.find((message) => message.role === 'system');
-    expect(systemMessage?.content).toContain(
-      'Use schedule_once_task for one-time future times, schedule_recurring_task for recurring calendar times, and schedule_interval_task only for elapsed intervals.',
-    );
-    expect(systemMessage?.content).toContain(
-      'Do not reach for web or browser work unless this turn explicitly allows it.',
-    );
     const firstNames = toolNamesFromPayload(firstPayload);
     expect(firstNames).toEqual(['schedule_once_task']);
     expect(firstPayload.tool_choice).toBe('required');
@@ -699,7 +722,7 @@ describe('OpenAIRuntimeAdapter', () => {
     );
   });
 
-  it('exposes safe state tools on plain-response turns so the model can schedule or remember', async () => {
+  it('keeps plain-response turns limited to safe memory tools', async () => {
     mockPostJson.mockResolvedValueOnce({
       choices: [
         {
@@ -744,8 +767,9 @@ describe('OpenAIRuntimeAdapter', () => {
     const names = toolNamesFromPayload(payload);
     expect(payload.messages[0]?.role).toBe('system');
     expect(names).toContain('remember_this');
-    expect(names).toContain('schedule_task');
-    expect(names).toContain('register_watch');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
     expect(names).not.toContain('web_search');
   });
 
@@ -811,8 +835,9 @@ describe('OpenAIRuntimeAdapter', () => {
     };
     const names = toolNamesFromPayload(payload);
     expect(names).toContain('remember_this');
-    expect(names).toContain('schedule_task');
-    expect(names).toContain('register_watch');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
     expect(names).not.toContain('browser_open_url');
     expect(names).not.toContain('web_search');
   });
@@ -937,7 +962,7 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(joined).toContain('hello there from the current turn');
   });
 
-  it('lets cloud plain-response turns use the full max token budget when no tool calls are made', async () => {
+  it('caps cloud plain-response turns even when no tool calls are made', async () => {
     mockPostJson.mockResolvedValueOnce({
       choices: [
         {
@@ -972,7 +997,7 @@ describe('OpenAIRuntimeAdapter', () => {
       1,
       'https://api.deepinfra.com/v1/openai/chat/completions',
       expect.objectContaining({
-        max_tokens: 2048,
+        max_tokens: 1536,
       }),
       expect.any(Object),
       expect.any(Number),
