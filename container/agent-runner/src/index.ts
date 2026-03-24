@@ -112,6 +112,14 @@ const MAX_PRIOR_CHARS = Math.max(
   Number.parseInt(process.env.OPENAI_MAX_PRIOR_CHARS || '16000', 10) || 16000,
 );
 
+function groupWorkspaceDir(): string {
+  return process.env.NANOCLAW_GROUP_WORKSPACE_DIR || '/workspace/group';
+}
+
+function globalWorkspaceDir(): string {
+  return process.env.NANOCLAW_GLOBAL_WORKSPACE_DIR || '/workspace/global';
+}
+
 /**
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
@@ -188,8 +196,8 @@ function loadLegacySystemPrompt(containerInput: ContainerInput): string[] {
   }
 
   const prompts: string[] = [];
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  const localClaudeMdPath = '/workspace/group/CLAUDE.md';
+  const globalClaudeMdPath = path.join(globalWorkspaceDir(), 'CLAUDE.md');
+  const localClaudeMdPath = path.join(groupWorkspaceDir(), 'CLAUDE.md');
 
   if (fs.existsSync(globalClaudeMdPath)) {
     prompts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8').trim());
@@ -260,7 +268,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = path.join(groupWorkspaceDir(), 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -488,15 +496,31 @@ async function runQuery(
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMd = buildSystemPrompt(containerInput);
 
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  // Native mode uses configured host directories; docker falls back to /workspace/extra.
   const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
-  if (fs.existsSync(extraBase)) {
-    for (const entry of fs.readdirSync(extraBase)) {
-      const fullPath = path.join(extraBase, entry);
-      if (fs.statSync(fullPath).isDirectory()) {
-        extraDirs.push(fullPath);
+  const hostDirsEnv = process.env.NANOCLAW_HOST_DIRECTORIES;
+  if (hostDirsEnv) {
+    try {
+      const config = JSON.parse(hostDirsEnv) as {
+        directories?: Array<{ path?: string }>;
+      };
+      for (const dir of config.directories || []) {
+        if (dir.path && fs.existsSync(dir.path)) {
+          extraDirs.push(dir.path);
+        }
+      }
+    } catch {
+      // Ignore malformed host directory configuration.
+    }
+  }
+  if (extraDirs.length === 0) {
+    const extraBase = '/workspace/extra';
+    if (fs.existsSync(extraBase)) {
+      for (const entry of fs.readdirSync(extraBase)) {
+        const fullPath = path.join(extraBase, entry);
+        if (fs.statSync(fullPath).isDirectory()) {
+          extraDirs.push(fullPath);
+        }
       }
     }
   }
@@ -507,7 +531,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      cwd: '/workspace/group',
+      cwd: groupWorkspaceDir(),
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -536,6 +560,12 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            ...(process.env.NANOCLAW_IPC_INPUT_DIR
+              ? { NANOCLAW_IPC_INPUT_DIR: process.env.NANOCLAW_IPC_INPUT_DIR }
+              : {}),
+            ...(process.env.NANOCLAW_HOST_DIRECTORIES
+              ? { NANOCLAW_HOST_DIRECTORIES: process.env.NANOCLAW_HOST_DIRECTORIES }
+              : {}),
           },
         },
       },
