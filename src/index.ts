@@ -85,6 +85,11 @@ import {
   capabilityRouteSummary,
   resolveCapabilityRoute,
 } from './runtime/capability-router.js';
+import {
+  resolveLatencyTurnPolicy,
+  type LatencyTurnClass,
+  type RuntimeSecretOverrides,
+} from './runtime/latency-policy.js';
 import { migrateToLocalOnlyIfNeeded } from './runtime/local-only-migration.js';
 import {
   acquireProcessLock as claimProcessLock,
@@ -126,13 +131,7 @@ const CONTINUITY_SCAN_LIMIT = 120;
 const CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES = 8;
 const CONTINUITY_SUMMARY_MIN_OLDER_CHARS = 3000;
 const typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
-type TurnClass =
-  | 'tiny_conversation'
-  | 'simple_conversation'
-  | 'normal_conversation'
-  | 'memory_or_state'
-  | 'web_or_browser'
-  | 'scheduling';
+type TurnClass = LatencyTurnClass;
 
 async function pulseTyping(channel: Channel, chatJid: string): Promise<void> {
   try {
@@ -528,6 +527,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const useFastLane =
     primaryProvider === 'openai_compatible' &&
     (turnClass === 'tiny_conversation' || turnClass === 'simple_conversation');
+  const latencyTurnPolicy = resolveLatencyTurnPolicy(turnClass);
   let prompt: string;
   if (useFastLane) {
     prompt =
@@ -668,7 +668,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
   let lastStreamError: string | null = null;
-  let firstVisibleOutputAt: number | null = null;
+  let firstModelOutputAt: number | null = null;
+  let firstUserVisibleOutputAt: number | null = null;
+  let finalUserVisibleOutputAt: number | null = null;
   let partialBuffer = '';
   let streamedMessageRef: ChannelMessageRef | null = null;
   let assistantReplyRecorded = false;
@@ -691,11 +693,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           `Agent output: ${raw.slice(0, 200)}`,
         );
         if (text && result.isPartial) {
+          firstModelOutputAt ??= Date.now();
           partialBuffer += text;
-          firstVisibleOutputAt ??= Date.now();
           // Keep typing indicator visible — send nothing until the final result.
         } else if (text) {
-          firstVisibleOutputAt ??= Date.now();
+          firstModelOutputAt ??= Date.now();
           if (
             streamedMessageRef &&
             channel.updateMessage &&
@@ -709,6 +711,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
             await channel.sendMessage(chatJid, text);
           }
+          firstUserVisibleOutputAt ??= Date.now();
+          finalUserVisibleOutputAt = Date.now();
           if (!assistantReplyRecorded) {
             recordAssistantReply(chatJid, text);
             assistantReplyRecorded = true;
@@ -740,10 +744,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     {
       turnClass,
-      // Fast lane skips continuity assembly, but still keeps compact persona
-      // and user-memory context so short Discord turns remain grounded.
-      skipContextBundle: false,
-      disableTools: useFastLane,
+      skipContextBundle: latencyTurnPolicy.skipContextBundle,
+      disableTools: latencyTurnPolicy.disableTools || useFastLane,
+      runtimeSecretOverrides: latencyTurnPolicy.runtimeSecretOverrides,
     },
   );
 
@@ -756,12 +759,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       latency: {
         ingest_ms: contextReadyAt - processingStartedAt,
         context_ms: contextReadyAt - processingStartedAt,
-        api_first_byte_ms:
-          firstVisibleOutputAt === null
+        model_first_output_ms:
+          firstModelOutputAt === null
             ? null
-            : firstVisibleOutputAt - contextReadyAt,
+            : firstModelOutputAt - contextReadyAt,
+        first_visible_output_ms:
+          firstUserVisibleOutputAt === null
+            ? null
+            : firstUserVisibleOutputAt - contextReadyAt,
+        final_visible_output_ms:
+          finalUserVisibleOutputAt === null
+            ? null
+            : finalUserVisibleOutputAt - contextReadyAt,
         total_ms: Date.now() - processingStartedAt,
       },
+      promptChars: prompt.length,
       partialChars: partialBuffer.length,
       outputSentToUser,
       hadError,
@@ -940,6 +952,7 @@ async function runAgent(
     turnClass?: TurnClass;
     skipContextBundle?: boolean;
     disableTools?: boolean;
+    runtimeSecretOverrides?: RuntimeSecretOverrides;
   },
 ): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.isMain === true;
@@ -1029,6 +1042,27 @@ async function runAgent(
           'Context builder warnings',
         );
       }
+      logger.info(
+        {
+          group: group.folder,
+          profile: profile.id,
+          turnClass: options?.turnClass,
+          promptChars: prompt.length,
+          skipContextBundle: options?.skipContextBundle === true,
+          disableTools: options?.disableTools === true,
+          contextChars: contextBundle?.systemPrompt.length || 0,
+          contextWarnings: contextBundle?.diagnostics.warnings.length || 0,
+          runtimeOverrides: options?.runtimeSecretOverrides
+            ? Object.keys(options.runtimeSecretOverrides)
+            : [],
+        },
+        'Prepared turn context',
+      );
+      const runtimeSecretOverrides = Object.fromEntries(
+        Object.entries(options?.runtimeSecretOverrides || {}).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      );
       if (
         resolved.authRefreshMessage &&
         resolved.authRefreshMessage.toLowerCase().includes('refreshed')
@@ -1095,7 +1129,10 @@ async function runAgent(
               : resolved.runtimeConfig.capabilities,
           },
           retryPolicy: runtimeSelection.retryPolicy,
-          secrets: resolved.secrets,
+          secrets: {
+            ...resolved.secrets,
+            ...runtimeSecretOverrides,
+          },
         },
         {
           onProcess: (proc, containerName) =>
