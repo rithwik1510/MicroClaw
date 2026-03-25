@@ -86,6 +86,7 @@ import {
   resolveCapabilityRoute,
 } from './runtime/capability-router.js';
 import {
+  appendStreamText,
   resolveLatencyTurnPolicy,
   type LatencyTurnClass,
   type RuntimeSecretOverrides,
@@ -280,6 +281,7 @@ function resolveContextTurnMode(
   prompt: string,
   capabilityRoute:
     | 'plain_response'
+    | 'host_file_operation'
     | 'web_lookup'
     | 'browser_operation'
     | 'deny_or_escalate',
@@ -290,6 +292,7 @@ function resolveContextTurnMode(
   | 'scheduling_planning' {
   if (looksLikeSchedulingPrompt(prompt)) return 'scheduling_planning';
   if (
+    capabilityRoute === 'host_file_operation' ||
     capabilityRoute === 'web_lookup' ||
     capabilityRoute === 'browser_operation'
   ) {
@@ -694,7 +697,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         );
         if (text && result.isPartial) {
           firstModelOutputAt ??= Date.now();
-          partialBuffer += text;
+          partialBuffer = appendStreamText(partialBuffer, text);
           // Keep typing indicator visible — send nothing until the final result.
         } else if (text) {
           firstModelOutputAt ??= Date.now();

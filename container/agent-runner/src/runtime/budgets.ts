@@ -1,5 +1,6 @@
 type CapabilityRoute =
   | 'plain_response'
+  | 'host_file_operation'
   | 'web_lookup'
   | 'browser_operation'
   | 'deny_or_escalate';

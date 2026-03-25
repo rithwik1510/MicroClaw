@@ -19,6 +19,18 @@ export interface LatencyTurnPolicy {
   runtimeSecretOverrides: RuntimeSecretOverrides;
 }
 
+function endsWithWordLike(text: string): boolean {
+  return /[A-Za-z0-9]$/.test(text);
+}
+
+function startsWithWordLike(text: string): boolean {
+  return /^[A-Za-z0-9]/.test(text);
+}
+
+function endsWithSentencePunctuation(text: string): boolean {
+  return /[.!?]$/.test(text);
+}
+
 export function resolveLatencyTurnPolicy(
   turnClass: LatencyTurnClass,
 ): LatencyTurnPolicy {
@@ -50,4 +62,17 @@ export function resolveLatencyTurnPolicy(
         runtimeSecretOverrides: {},
       };
   }
+}
+
+export function appendStreamText(buffer: string, chunk: string): string {
+  if (!chunk) return buffer;
+  if (!buffer) return chunk;
+  if (/^\s/.test(chunk)) return `${buffer}${chunk}`;
+  if (endsWithSentencePunctuation(buffer) && startsWithWordLike(chunk)) {
+    return `${buffer} ${chunk}`;
+  }
+  if (endsWithWordLike(buffer) && startsWithWordLike(chunk)) {
+    return `${buffer} ${chunk}`;
+  }
+  return `${buffer}${chunk}`;
 }
