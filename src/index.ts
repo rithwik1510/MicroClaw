@@ -2,13 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import { migrateEnvCredentialsToAuthProfilesIfNeeded } from './auth/auth-manager.js';
 
+import { OneCLI } from '@onecli-sh/sdk';
+
 import {
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
   OPENAI_WARM_SESSIONS,
   OPENAI_SESSION_IDLE_TIMEOUT_MS,
+  ONECLI_URL,
   POLL_INTERVAL,
+  TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
 import './channels/index.js';
@@ -69,6 +73,17 @@ import {
 import { insertMemoryEntry } from './db.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startHeartbeatLoop } from './heartbeat.js';
+import {
+  restoreRemoteControl,
+  startRemoteControl,
+  stopRemoteControl,
+} from './remote-control.js';
+import {
+  isSenderAllowed,
+  isTriggerAllowed,
+  loadSenderAllowlist,
+  shouldDropMessage,
+} from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
   Channel,
@@ -85,6 +100,12 @@ import {
   capabilityRouteSummary,
   resolveCapabilityRoute,
 } from './runtime/capability-router.js';
+import {
+  appendStreamText,
+  resolveLatencyTurnPolicy,
+  type LatencyTurnClass,
+  type RuntimeSecretOverrides,
+} from './runtime/latency-policy.js';
 import { migrateToLocalOnlyIfNeeded } from './runtime/local-only-migration.js';
 import {
   acquireProcessLock as claimProcessLock,
@@ -126,13 +147,7 @@ const CONTINUITY_SCAN_LIMIT = 120;
 const CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES = 8;
 const CONTINUITY_SUMMARY_MIN_OLDER_CHARS = 3000;
 const typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
-type TurnClass =
-  | 'tiny_conversation'
-  | 'simple_conversation'
-  | 'normal_conversation'
-  | 'memory_or_state'
-  | 'web_or_browser'
-  | 'scheduling';
+type TurnClass = LatencyTurnClass;
 
 async function pulseTyping(channel: Channel, chatJid: string): Promise<void> {
   try {
@@ -166,10 +181,15 @@ function stopAllTypingHeartbeats(): void {
 }
 
 function currentPromptMessage(prompt: string): string {
-  const marker = '[Current message - respond to this]';
-  const index = prompt.lastIndexOf(marker);
-  if (index === -1) return prompt.trim();
-  return prompt.slice(index + marker.length).trim();
+  const markers = [
+    '[Current message - this is the only request you should answer now]',
+    '[Current message - respond to this]',
+  ];
+  for (const marker of markers) {
+    const index = prompt.lastIndexOf(marker);
+    if (index !== -1) return prompt.slice(index + marker.length).trim();
+  }
+  return prompt.trim();
 }
 
 function isHostGreetingLike(prompt: string): boolean {
@@ -212,6 +232,22 @@ function isHostShortCasualPrompt(prompt: string): boolean {
   const words = current.split(' ').filter(Boolean);
   return (
     words.length <= 6 && current.length <= 32 && !isLikelyWebPrompt(current)
+  );
+}
+
+function isReferentialFollowUpPrompt(prompt: string): boolean {
+  const current = currentPromptMessage(prompt)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!current) return false;
+  return (
+    /\b(again|repeat|rephrase|continue|resume|elaborate|expand|clarify|that|this|previous|last answer|last response|same answer|same thing)\b/.test(
+      current,
+    ) ||
+    /^(what do you mean|can you explain|can you give me the answer again|say that again|repeat that|what was that)\b/.test(
+      current,
+    )
   );
 }
 
@@ -272,6 +308,7 @@ function classifyTurnClass(prompt: string): TurnClass {
   if (looksLikeSchedulingPrompt(prompt)) return 'scheduling';
   if (isLikelyWebPrompt(prompt)) return 'web_or_browser';
   if (isMemoryAssistedPrompt(prompt)) return 'memory_or_state';
+  if (isReferentialFollowUpPrompt(prompt)) return 'memory_or_state';
   if (isTinyConversationLike(prompt)) return 'tiny_conversation';
   if (isHostShortCasualPrompt(prompt)) return 'simple_conversation';
   return 'normal_conversation';
@@ -281,6 +318,7 @@ function resolveContextTurnMode(
   prompt: string,
   capabilityRoute:
     | 'plain_response'
+    | 'host_file_operation'
     | 'web_lookup'
     | 'browser_operation'
     | 'deny_or_escalate',
@@ -291,6 +329,7 @@ function resolveContextTurnMode(
   | 'scheduling_planning' {
   if (looksLikeSchedulingPrompt(prompt)) return 'scheduling_planning';
   if (
+    capabilityRoute === 'host_file_operation' ||
     capabilityRoute === 'web_lookup' ||
     capabilityRoute === 'browser_operation'
   ) {
@@ -342,6 +381,27 @@ function releaseProcessLock(): void {
   hasProcessLock = false;
 }
 
+const onecli = new OneCLI({ url: ONECLI_URL });
+
+function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
+  if (group.isMain) return;
+  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
+  onecli.ensureAgent({ name: group.name, identifier }).then(
+    (res) => {
+      logger.info(
+        { jid, identifier, created: res.created },
+        'OneCLI agent ensured',
+      );
+    },
+    (err) => {
+      logger.debug(
+        { jid, identifier, err: String(err) },
+        'OneCLI agent ensure skipped',
+      );
+    },
+  );
+}
+
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
   const agentTs = getRouterState('last_agent_timestamp');
@@ -381,6 +441,9 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+  // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
+  ensureOneCLIAgent(jid, group);
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -525,74 +588,53 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const latestPromptText =
     latestUserMessage?.content || formatMessages(missedMessages);
   const turnClass = classifyTurnClass(latestPromptText);
-  const useFastLane =
-    primaryProvider === 'openai_compatible' &&
-    (turnClass === 'tiny_conversation' || turnClass === 'simple_conversation');
+  const latencyTurnPolicy = resolveLatencyTurnPolicy(turnClass);
   let prompt: string;
-  if (useFastLane) {
-    prompt =
-      turnClass === 'tiny_conversation'
-        ? formatMessages(missedMessages.slice(-1))
-        : formatMessages(missedMessages.slice(-2));
-    logger.info(
-      {
-        group: group.folder,
-        turnClass,
-        mode: 'fast_lane',
-        session_mode: 'cold_start',
-      },
-      'Skipped continuity for trivial conversational turn',
-    );
-  } else {
-    const recentConversation = getRecentMessages(
-      chatJid,
-      CONTINUITY_SCAN_LIMIT,
-    );
-    const storedSummary = getConversationSummary(group.folder);
-    const continuityPlan = buildContinuityPlan({
-      assistantName: ASSISTANT_NAME,
-      conversationMessages: recentConversation,
-      currentMessages: missedMessages,
-      storedSummary: storedSummary?.summary,
-      recentTurnLimit: CONTINUITY_RECENT_LIMIT,
-      summaryMinMessages: CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES,
-      summaryMinChars: CONTINUITY_SUMMARY_MIN_OLDER_CHARS,
+  const recentConversation = getRecentMessages(chatJid, CONTINUITY_SCAN_LIMIT);
+  const storedSummary = getConversationSummary(group.folder);
+  const continuityPlan = buildContinuityPlan({
+    assistantName: ASSISTANT_NAME,
+    conversationMessages: recentConversation,
+    currentMessages: missedMessages,
+    storedSummary: storedSummary?.summary,
+    recentTurnLimit: CONTINUITY_RECENT_LIMIT,
+    summaryMinMessages: CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES,
+    summaryMinChars: CONTINUITY_SUMMARY_MIN_OLDER_CHARS,
+  });
+  if (
+    continuityPlan.shouldPersistSummary &&
+    (storedSummary?.summary !== continuityPlan.computedSummary ||
+      storedSummary?.sourceMessageCount !==
+        continuityPlan.sourceMessageCount ||
+      storedSummary?.lastMessageTimestamp !==
+        continuityPlan.lastMessageTimestamp)
+  ) {
+    setConversationSummary({
+      groupFolder: group.folder,
+      summary: continuityPlan.computedSummary,
+      sourceMessageCount: continuityPlan.sourceMessageCount,
+      lastMessageTimestamp: continuityPlan.lastMessageTimestamp,
     });
-    if (
-      continuityPlan.shouldPersistSummary &&
-      (storedSummary?.summary !== continuityPlan.computedSummary ||
-        storedSummary?.sourceMessageCount !==
-          continuityPlan.sourceMessageCount ||
-        storedSummary?.lastMessageTimestamp !==
-          continuityPlan.lastMessageTimestamp)
-    ) {
-      setConversationSummary({
-        groupFolder: group.folder,
-        summary: continuityPlan.computedSummary,
-        sourceMessageCount: continuityPlan.sourceMessageCount,
-        lastMessageTimestamp: continuityPlan.lastMessageTimestamp,
-      });
-    }
-    prompt =
-      primaryProvider === 'openai_compatible'
-        ? buildContinuityPrompt({
-            assistantName: ASSISTANT_NAME,
-            summary: continuityPlan.summaryToUse,
-            recentContextMessages: continuityPlan.recentContextMessages,
-            currentMessages: continuityPlan.currentMessages,
-          })
-        : formatMessages(missedMessages);
-
-    logger.info(
-      {
-        group: group.folder,
-        continuity: continuityPlan.diagnostics,
-        turnClass,
-        session_mode: 'cold_start',
-      },
-      'Continuity context assembled',
-    );
   }
+  prompt =
+    primaryProvider === 'openai_compatible'
+      ? buildContinuityPrompt({
+          assistantName: ASSISTANT_NAME,
+          summary: continuityPlan.summaryToUse,
+          recentContextMessages: continuityPlan.recentContextMessages,
+          currentMessages: continuityPlan.currentMessages,
+        })
+      : formatMessages(missedMessages);
+
+  logger.info(
+    {
+      group: group.folder,
+      continuity: continuityPlan.diagnostics,
+      turnClass,
+      session_mode: 'cold_start',
+    },
+    'Continuity context assembled',
+  );
 
   const memoryCandidates = extractMemoryCandidates(
     missedMessages,
@@ -668,7 +710,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
   let lastStreamError: string | null = null;
-  let firstVisibleOutputAt: number | null = null;
+  let firstModelOutputAt: number | null = null;
+  let firstUserVisibleOutputAt: number | null = null;
+  let finalUserVisibleOutputAt: number | null = null;
   let partialBuffer = '';
   let streamedMessageRef: ChannelMessageRef | null = null;
   let assistantReplyRecorded = false;
@@ -691,11 +735,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           `Agent output: ${raw.slice(0, 200)}`,
         );
         if (text && result.isPartial) {
-          partialBuffer += text;
-          firstVisibleOutputAt ??= Date.now();
-          // Keep typing indicator visible — send nothing until the final result.
+          firstModelOutputAt ??= Date.now();
+          partialBuffer = appendStreamText(partialBuffer, text);
         } else if (text) {
-          firstVisibleOutputAt ??= Date.now();
+          firstModelOutputAt ??= Date.now();
           if (
             streamedMessageRef &&
             channel.updateMessage &&
@@ -709,6 +752,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
             await channel.sendMessage(chatJid, text);
           }
+          firstUserVisibleOutputAt ??= Date.now();
+          finalUserVisibleOutputAt = Date.now();
           if (!assistantReplyRecorded) {
             recordAssistantReply(chatJid, text);
             assistantReplyRecorded = true;
@@ -740,10 +785,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     {
       turnClass,
-      // Fast lane skips continuity assembly, but still keeps compact persona
-      // and user-memory context so short Discord turns remain grounded.
-      skipContextBundle: false,
-      disableTools: useFastLane,
+      skipContextBundle: latencyTurnPolicy.skipContextBundle,
+      disableTools: latencyTurnPolicy.disableTools,
+      runtimeSecretOverrides: latencyTurnPolicy.runtimeSecretOverrides,
     },
   );
 
@@ -756,12 +800,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       latency: {
         ingest_ms: contextReadyAt - processingStartedAt,
         context_ms: contextReadyAt - processingStartedAt,
-        api_first_byte_ms:
-          firstVisibleOutputAt === null
+        model_first_output_ms:
+          firstModelOutputAt === null
             ? null
-            : firstVisibleOutputAt - contextReadyAt,
+            : firstModelOutputAt - contextReadyAt,
+        first_visible_output_ms:
+          firstUserVisibleOutputAt === null
+            ? null
+            : firstUserVisibleOutputAt - contextReadyAt,
+        final_visible_output_ms:
+          finalUserVisibleOutputAt === null
+            ? null
+            : finalUserVisibleOutputAt - contextReadyAt,
         total_ms: Date.now() - processingStartedAt,
       },
+      promptChars: prompt.length,
       partialChars: partialBuffer.length,
       outputSentToUser,
       hadError,
@@ -940,6 +993,8 @@ async function runAgent(
     turnClass?: TurnClass;
     skipContextBundle?: boolean;
     disableTools?: boolean;
+    runtimeSecretOverrides?: RuntimeSecretOverrides;
+    singleTurn?: boolean;
   },
 ): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.isMain === true;
@@ -1029,6 +1084,27 @@ async function runAgent(
           'Context builder warnings',
         );
       }
+      logger.info(
+        {
+          group: group.folder,
+          profile: profile.id,
+          turnClass: options?.turnClass,
+          promptChars: prompt.length,
+          skipContextBundle: options?.skipContextBundle === true,
+          disableTools: options?.disableTools === true,
+          contextChars: contextBundle?.systemPrompt.length || 0,
+          contextWarnings: contextBundle?.diagnostics.warnings.length || 0,
+          runtimeOverrides: options?.runtimeSecretOverrides
+            ? Object.keys(options.runtimeSecretOverrides)
+            : [],
+        },
+        'Prepared turn context',
+      );
+      const runtimeSecretOverrides = Object.fromEntries(
+        Object.entries(options?.runtimeSecretOverrides || {}).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      );
       if (
         resolved.authRefreshMessage &&
         resolved.authRefreshMessage.toLowerCase().includes('refreshed')
@@ -1072,6 +1148,7 @@ async function runAgent(
           prompt,
           systemPrompt: contextBundle?.systemPrompt || undefined,
           sessionId,
+          singleTurn: options?.singleTurn,
           groupFolder: group.folder,
           chatJid,
           isMain,
@@ -1095,7 +1172,10 @@ async function runAgent(
               : resolved.runtimeConfig.capabilities,
           },
           retryPolicy: runtimeSelection.retryPolicy,
-          secrets: resolved.secrets,
+          secrets: {
+            ...resolved.secrets,
+            ...runtimeSecretOverrides,
+          },
         },
         {
           onProcess: (proc, containerName) =>
@@ -1271,8 +1351,12 @@ async function startMessageLoop(): Promise<void> {
           // context when a trigger eventually arrives.
           // DMs never require a trigger.
           if (needsTrigger) {
-            const hasTrigger = groupMessages.some((m) =>
-              TRIGGER_PATTERN.test(m.content.trim()),
+            const allowlistCfg = loadSenderAllowlist();
+            const hasTrigger = groupMessages.some(
+              (m) =>
+                TRIGGER_PATTERN.test(m.content.trim()) &&
+                (m.is_from_me ||
+                  isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
@@ -1394,6 +1478,14 @@ async function main(): Promise<void> {
     );
   }
 
+  // Ensure OneCLI agents exist for all registered groups.
+  // Recovers from missed creates (e.g. OneCLI was down at registration time).
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    ensureOneCLIAgent(jid, group);
+  }
+
+  restoreRemoteControl();
+
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
@@ -1406,9 +1498,78 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
+  // Handle /remote-control and /remote-control-end commands
+  async function handleRemoteControl(
+    command: string,
+    chatJid: string,
+    msg: NewMessage,
+  ): Promise<void> {
+    const group = registeredGroups[chatJid];
+    if (!group?.isMain) {
+      logger.warn(
+        { chatJid, sender: msg.sender },
+        'Remote control rejected: not main group',
+      );
+      return;
+    }
+
+    const channel = findChannel(channels, chatJid);
+    if (!channel) return;
+
+    if (command === '/remote-control') {
+      const result = await startRemoteControl(
+        msg.sender,
+        chatJid,
+        process.cwd(),
+      );
+      if (result.ok) {
+        await channel.sendMessage(chatJid, result.url);
+      } else {
+        await channel.sendMessage(
+          chatJid,
+          `Remote Control failed: ${result.error}`,
+        );
+      }
+    } else {
+      const result = stopRemoteControl();
+      if (result.ok) {
+        await channel.sendMessage(chatJid, 'Remote Control session ended.');
+      } else {
+        await channel.sendMessage(chatJid, result.error);
+      }
+    }
+  }
+
   // Channel callbacks (shared by all channels)
   const channelOpts = {
-    onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
+    onMessage: (chatJid: string, msg: NewMessage) => {
+      // Remote control commands — intercept before storage
+      const trimmed = msg.content.trim();
+      if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
+        handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
+          logger.error({ err, chatJid }, 'Remote control command error'),
+        );
+        return;
+      }
+
+      // Sender allowlist drop mode: discard messages from denied senders before storing
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const cfg = loadSenderAllowlist();
+        if (
+          shouldDropMessage(chatJid, cfg) &&
+          !isSenderAllowed(chatJid, msg.sender, cfg)
+        ) {
+          if (cfg.logDenied) {
+            logger.debug(
+              { chatJid, sender: msg.sender },
+              'sender-allowlist: dropping message (drop mode)',
+            );
+          }
+          return;
+        }
+      }
+      storeMessage(msg);
+    },
     onChatMetadata: (
       chatJid: string,
       timestamp: string,
@@ -1502,6 +1663,21 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onTasksChanged: () => {
+      const tasks = getAllTasks();
+      const taskRows = tasks.map((t) => ({
+        id: t.id,
+        groupFolder: t.group_folder,
+        prompt: t.prompt,
+        schedule_type: t.schedule_type,
+        schedule_value: t.schedule_value,
+        status: t.status,
+        next_run: t.next_run,
+      }));
+      for (const group of Object.values(registeredGroups)) {
+        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+      }
+    },
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();

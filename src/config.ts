@@ -2,6 +2,7 @@ import os from 'os';
 import path from 'path';
 
 import { readEnvFile } from './env.js';
+import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
 // Secrets are NOT read here — they stay on disk and are loaded only
@@ -11,6 +12,8 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'NANOCLAW_POLL_INTERVAL_MS',
   'NANOCLAW_IPC_POLL_INTERVAL_MS',
+  'ONECLI_URL',
+  'TZ',
 ]);
 
 function parsePositiveInt(raw: string | undefined, fallback: number): number {
@@ -53,6 +56,12 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
   'microclaw',
   'mount-allowlist.json',
 );
+export const SENDER_ALLOWLIST_PATH = path.join(
+  HOME_DIR,
+  '.config',
+  'nanoclaw',
+  'sender-allowlist.json',
+);
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
@@ -68,6 +77,8 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760',
   10,
 ); // 10MB default
+export const ONECLI_URL =
+  process.env.ONECLI_URL || envConfig.ONECLI_URL || 'http://localhost:10254';
 export const IPC_POLL_INTERVAL = parsePositiveInt(
   process.env.NANOCLAW_IPC_POLL_INTERVAL_MS ||
     envConfig.NANOCLAW_IPC_POLL_INTERVAL_MS,
@@ -116,7 +127,17 @@ export const TRIGGER_PATTERN = new RegExp(
   'i',
 );
 
-// Timezone for scheduled tasks (cron expressions, etc.)
-// Uses system timezone by default
-export const TIMEZONE =
-  process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+// Timezone for scheduled tasks, message formatting, etc.
+// Validates each candidate is a real IANA identifier before accepting.
+function resolveConfigTimezone(): string {
+  const candidates = [
+    process.env.TZ,
+    envConfig.TZ,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+  ];
+  for (const tz of candidates) {
+    if (tz && isValidTimezone(tz)) return tz;
+  }
+  return 'UTC';
+}
+export const TIMEZONE = resolveConfigTimezone();

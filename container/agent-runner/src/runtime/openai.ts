@@ -6,6 +6,7 @@ import {
   RuntimeAdapter,
   RuntimeRequest,
   RuntimeResponse,
+  RuntimeToolFamily,
   RuntimeUsageMetrics,
 } from './types.js';
 import {
@@ -145,6 +146,15 @@ type BrowserBootstrapState = {
   openedUrl?: string;
 };
 
+type RouteToolContract = {
+  required: boolean;
+  label: string;
+  requiredFamilies: RuntimeToolFamily[];
+  satisfyingToolNames?: string[];
+  failureMessage: string;
+  retryInstruction: string;
+};
+
 type PlanningIntensity = 'off' | 'optional' | 'recommended';
 type SchedulingMode = 'none' | 'once' | 'interval' | 'cron' | 'watch';
 type TurnMode =
@@ -165,6 +175,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private static readonly LOCAL_TOOL_RESERVE_TOKENS = 900;
   private static readonly LOCAL_NON_TOOL_RESERVE_TOKENS = 250;
   private static readonly MIN_INPUT_BUDGET_TOKENS = 700;
+  private static readonly CLOUD_CONVERSATIONAL_MAX_OUTPUT_TOKENS = 2400;
 
   private createUsageAccumulator(): UsageAccumulator {
     return {
@@ -315,10 +326,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   }
 
   private currentTurnPrompt(prompt: string): string {
-    const marker = '[Current message - respond to this]';
-    const index = prompt.lastIndexOf(marker);
-    if (index === -1) return prompt.trim();
-    return prompt.slice(index + marker.length).trim();
+    const markers = [
+      '[Current message - this is the only request you should answer now]',
+      '[Current message - respond to this]',
+    ];
+    for (const marker of markers) {
+      const index = prompt.lastIndexOf(marker);
+      if (index !== -1) return prompt.slice(index + marker.length).trim();
+    }
+    return prompt.trim();
   }
 
   private shouldPrefixNoThink(model: string): boolean {
@@ -837,9 +853,21 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private trimUserPromptToBudget(prompt: string, maxChars: number): string {
     if (maxChars <= 0 || prompt.length <= maxChars) return prompt;
 
-    const marker = '[Current message - respond to this]';
-    const index = prompt.lastIndexOf(marker);
-    if (index === -1) {
+    const markers = [
+      '[Current message - this is the only request you should answer now]',
+      '[Current message - respond to this]',
+    ];
+    let marker: string | null = null;
+    let index = -1;
+    for (const candidate of markers) {
+      const candidateIndex = prompt.lastIndexOf(candidate);
+      if (candidateIndex !== -1) {
+        marker = candidate;
+        index = candidateIndex;
+        break;
+      }
+    }
+    if (index === -1 || !marker) {
       return this.trimKeepEnd(prompt, maxChars);
     }
 
@@ -936,6 +964,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     tools: Array<Record<string, unknown>>;
     webEnabled: boolean;
     browserEnabled: boolean;
+    hostFilesEnabled: boolean;
   } {
     const route = this.effectiveCapabilityRoute(req);
     const providerToggle = (
@@ -952,6 +981,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     const browserEnabledByPolicy =
       req.config.toolPolicy?.browser?.enabled === true
       && route === 'browser_operation';
+    const hostFilesEnabledByRoute = route === 'host_file_operation';
     let registry = filterToolRegistry(
       buildToolRegistry(),
       {
@@ -974,11 +1004,17 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           tool.name === 'web_search',
       );
     }
+    if (route === 'host_file_operation') {
+      registry = registry.filter(
+        (tool) => tool.family === 'host_files' || tool.family === 'memory',
+      );
+    }
     return {
       registry,
       tools: toOpenAITools(registry),
       webEnabled: webEnabledByPolicy,
       browserEnabled: browserEnabledByPolicy,
+      hostFilesEnabled: hostFilesEnabledByRoute,
     };
   }
 
@@ -986,7 +1022,10 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     registry: ReturnType<typeof buildToolRegistry>,
   ): boolean {
     return registry.some(
-      (tool) => tool.family === 'web' || tool.family === 'browser',
+      (tool) =>
+        tool.family === 'web' ||
+        tool.family === 'browser' ||
+        tool.family === 'host_files',
     );
   }
 
@@ -1023,7 +1062,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
     if (
       input.route === 'web_lookup' ||
-      input.route === 'browser_operation'
+      input.route === 'browser_operation' ||
+      input.route === 'host_file_operation'
     ) {
       return 'web_browser';
     }
@@ -1038,6 +1078,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     input: {
       webEnabled: boolean;
       browserEnabled: boolean;
+      hostFilesEnabled: boolean;
       safeToolsPresent: boolean;
       metaToolsPresent: boolean;
     },
@@ -1045,7 +1086,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     if (turnMode === 'conversational') return input.safeToolsPresent;
     if (turnMode === 'memory_assisted') return input.safeToolsPresent;
     if (turnMode === 'web_browser') {
-      return input.browserEnabled || input.webEnabled || input.metaToolsPresent;
+      return (
+        input.browserEnabled ||
+        input.webEnabled ||
+        input.hostFilesEnabled ||
+        input.metaToolsPresent
+      );
     }
     return input.metaToolsPresent || input.safeToolsPresent;
   }
@@ -1114,7 +1160,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private resolvePlanningIntensity(
     req: RuntimeRequest,
     input: {
-      route: 'plain_response' | 'web_lookup' | 'browser_operation' | 'deny_or_escalate';
+      route:
+        | 'plain_response'
+        | 'host_file_operation'
+        | 'web_lookup'
+        | 'browser_operation'
+        | 'deny_or_escalate';
       webEnabled: boolean;
       browserEnabled: boolean;
       hasNonMetaTools: boolean;
@@ -1179,6 +1230,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private activeToolsForTurn(input: {
     baseRegistry: ReturnType<typeof buildToolRegistry>;
     baseTools: Array<Record<string, unknown>>;
+    route: ReturnType<OpenAIRuntimeAdapter['effectiveCapabilityRoute']>;
+    prompt: string;
     plannerState: ReturnType<typeof createPlannerCriticState> | null;
     planningIntensity: PlanningIntensity;
     sawToolCalls: boolean;
@@ -1212,6 +1265,23 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       };
     }
 
+    if (
+      !input.sawToolCalls &&
+      input.route === 'host_file_operation' &&
+      this.hostFileNeedsDirectoryDiscovery(input.prompt)
+    ) {
+      // Give all host-file tools so the model can discover AND act in one turn.
+      // tool_choice='required' on the first iteration already nudges the model
+      // to call list_host_directories before action tools.
+      const allHostFileTools = input.baseRegistry.filter(
+        (tool) => tool.family === 'host_files' || tool.family === 'memory',
+      );
+      return {
+        registry: allHostFileTools,
+        tools: toOpenAITools(allHostFileTools),
+      };
+    }
+
     const plannerTools = this.plannerToolsForTurn(
       input.plannerState,
       input.planningIntensity,
@@ -1235,7 +1305,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private resolveToolChoice(input: {
     usingBrowserFlow: boolean;
     usingWebFlow: boolean;
+    usingHostFileFlow: boolean;
     sawToolCalls: boolean;
+    contractSatisfied: boolean;
     bootstrapUsed: boolean;
     prompt: string;
     planningIntensity: PlanningIntensity;
@@ -1256,6 +1328,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     ) {
       return 'required';
     }
+    if (
+      (input.usingHostFileFlow || input.usingWebFlow) &&
+      !input.sawToolCalls &&
+      !input.contractSatisfied
+    ) {
+      return 'required';
+    }
     // Force web_search on the first step for web lookup routes so the model
     // cannot skip tool use by generating "let me search..." text instead.
     if (input.usingWebFlow && !input.sawToolCalls) {
@@ -1263,6 +1342,120 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
 
     return 'auto';
+  }
+
+  private resolveRouteToolContract(input: {
+    route: ReturnType<OpenAIRuntimeAdapter['effectiveCapabilityRoute']>;
+    schedulingIntent: boolean;
+    watchIntent: boolean;
+  }): RouteToolContract {
+    if (input.schedulingIntent || input.watchIntent) {
+      return {
+        required: true,
+        label: 'scheduling_planning',
+        requiredFamilies: ['meta'],
+        satisfyingToolNames: [
+          'schedule_task',
+          'schedule_once_task',
+          'schedule_recurring_task',
+          'schedule_interval_task',
+          'register_watch',
+        ],
+        failureMessage:
+          input.watchIntent && !input.schedulingIntent
+            ? "I entered scheduling mode but couldn't complete a valid watch-registration step."
+            : "I entered scheduling mode but couldn't complete a valid scheduling step.",
+        retryInstruction:
+          input.watchIntent && !input.schedulingIntent
+            ? 'This is still a scheduling turn. Use register_watch now. Do not answer conversationally until the watch tool succeeds.'
+            : 'This is still a scheduling turn. Use the correct scheduling tool now. Do not answer conversationally until the scheduling tool succeeds.',
+      };
+    }
+
+    if (input.route === 'host_file_operation') {
+      return {
+        required: true,
+        label: 'host_file_operation',
+        requiredFamilies: ['host_files'],
+        failureMessage:
+          "I entered host-file mode but couldn't complete a valid file-access step.",
+        retryInstruction:
+          'This is still a host-file turn. Use the native host-file tools now. For ambiguous folder visibility requests, call list_host_directories first. Do not claim you lack local file visibility unless a host-file tool actually fails.',
+      };
+    }
+
+    if (input.route === 'web_lookup') {
+      return {
+        required: true,
+        label: 'web_lookup',
+        requiredFamilies: ['web'],
+        failureMessage:
+          "I entered web-lookup mode but couldn't complete a real web lookup.",
+        retryInstruction:
+          'This is still a web-lookup turn. Use web_search or web_fetch now. Do not answer from stale knowledge, and do not say web access is unavailable unless the web tool actually fails.',
+      };
+    }
+
+    if (input.route === 'browser_operation') {
+      return {
+        required: true,
+        label: 'browser_operation',
+        requiredFamilies: ['browser'],
+        failureMessage:
+          "I entered browser mode but couldn't complete a valid browser action sequence.",
+        retryInstruction:
+          'This is still a browser-operation turn. Use the browser tools now. Do not reply with manual instructions, alternative plans, or access disclaimers unless a browser or web tool actually failed.',
+      };
+    }
+
+    return {
+      required: false,
+      label: 'plain_response',
+      requiredFamilies: [],
+      failureMessage: '',
+      retryInstruction: '',
+    };
+  }
+
+  private hostFileNeedsDirectoryDiscovery(prompt: string): boolean {
+    const current = this.currentTurnPrompt(prompt).toLowerCase();
+    if (this.hasExplicitHostPath(current)) return false;
+    const visibilityIntent =
+      /\b(see|view|show me|what(?:'s| is) in|check|look at|access|inspect|browse)\b/.test(
+        current,
+      );
+    const fileArea =
+      /\b(desktop|documents|downloads|folders|files|directory|directories|my computer|computer files)\b/.test(
+        current,
+      );
+    const directMutation =
+      /\b(read|write|edit|create|make|save|update|change|rename|move|copy|grep|glob)\b/.test(
+        current,
+      );
+    return visibilityIntent && fileArea && !directMutation;
+  }
+
+  private hasExplicitHostPath(text: string): boolean {
+    return /([a-z]:\\|[a-z]:\/|~[\\/]|\/users\/|\/home\/|\\\\)/i.test(text);
+  }
+
+  private toolSatisfiesContract(input: {
+    contract: RouteToolContract;
+    toolName: string;
+    toolFamily?: RuntimeToolFamily;
+    ok: boolean;
+  }): boolean {
+    if (!input.contract.required || !input.ok) return false;
+    if (
+      input.contract.satisfyingToolNames &&
+      input.contract.satisfyingToolNames.includes(input.toolName)
+    ) {
+      return true;
+    }
+    return (
+      Boolean(input.toolFamily) &&
+      input.contract.requiredFamilies.includes(input.toolFamily as RuntimeToolFamily)
+    );
   }
 
   private webConfig(req: RuntimeRequest): ToolExecutionContext {
@@ -1330,10 +1523,14 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     maxOutputTokens: number;
   }): number {
     if (input.route === 'plain_response' && !input.sawToolCalls) {
-      // Cap conversational responses: they rarely need more than 1536 tokens.
+      // Cap conversational responses high enough to avoid routine cutoffs,
+      // while still keeping DeepInfra/vLLM KV pre-allocation under control.
       // Smaller max_tokens improves TTFT on vLLM-based providers (DeepInfra)
       // which pre-allocate KV cache proportional to max_tokens.
-      return Math.min(input.maxOutputTokens, 1536);
+      return Math.min(
+        input.maxOutputTokens,
+        OpenAIRuntimeAdapter.CLOUD_CONVERSATIONAL_MAX_OUTPUT_TOKENS,
+      );
     }
     return Math.min(
       input.maxOutputTokens,
@@ -1731,23 +1928,30 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       return [
         'Conversation policy:',
         '- Answer directly when no tool is needed.',
-        '- Safe memory and scheduling tools may still be available on this turn.',
-        localTimeNote,
-        '- Use schedule_once_task for one-time future times, schedule_recurring_task for recurring calendar times, and schedule_interval_task only for elapsed intervals.',
-        '- Exact-time or recurring timed jobs include: "at 12 PM", "today at 6", "tomorrow morning", "in 2 hours", "every day at 9 AM", and "every weekday at noon".',
-        '- Schedule mapping: use the once tool for one-time times like "at 12 PM today" or "tomorrow at 9" and pass the phrase in "when"; use the recurring tool for calendar patterns like "every weekday at 8 AM" and pass the phrase in "recurrence"; use the interval tool only for repeating elapsed intervals like "every 5 minutes" or "every 2 hours" and pass the phrase in "every".',
-        '- For scheduling, pass the timing phrase naturally (e.g. "today at 5 PM"). Do NOT construct ISO timestamps.',
-        '- For those timed requests, do not do the task now and do not answer with the requested result now. Schedule it.',
-        '- Use register_watch only for ongoing monitoring instructions such as "keep an eye on this", "watch for changes", or "notify me if X happens".',
-        '- Do not use register_watch as a fallback when schedule_task fails. Report the scheduling problem instead.',
+        '- Sound like a capable personal operator: clear, warm, natural, and high-signal.',
+        '- Do not drift into generic assistant filler, canned check-ins, or over-friendly fluff.',
+        '- Lead with the answer, then add the next most useful detail.',
         '- Use remember_this only for durable user facts, preferences, or long-term project context.',
-        '- Do not reach for web or browser work unless this turn explicitly allows it.',
+        '- Do not call web, browser, scheduling, or host-file tools unless this turn explicitly allows them.',
       ].filter(Boolean).join('\n');
+    }
+    if (route === 'host_file_operation') {
+      return [
+        'Host file operation policy:',
+        '- This is a required host-file turn. A final answer without host-file tool use is invalid.',
+        '- Call list_host_directories first unless the conversation already contains a confirmed allowed path.',
+        '- Stay strictly within configured allowed directories.',
+        '- Then inspect with list_host_entries or act with the appropriate host-file tool.',
+        '- Do not claim you lack local file visibility unless a host-file tool actually fails.',
+        '- Do not use scheduling, browser, or web tools for local file work.',
+        '- If a write would overwrite or replace existing content, require explicit confirmation from the user first.',
+        '- Mention the exact path you read or changed in the final answer, along with the concrete outcome.',
+      ].join('\n');
     }
     if (route === 'browser_operation') {
       return [
         'Browser operator policy:',
-        '- You have browser tools for this turn because the task needs interactive browser work.',
+        '- This is a required browser-operation turn. A final answer without browser tool use is invalid.',
         '- You also have lightweight web lookup tools available to support the browser task when needed.',
         '- If the user names a site or product but does not give a URL, use web_search first to find the official site or login page, then use browser_open_url.',
         '- Use browser_open_url to start once you have the target URL.',
@@ -1776,8 +1980,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
     return [
       'Web lookup policy:',
-      '- You have web tools for this turn because the task needs live or external information.',
+      '- This is a required web-lookup turn. A final answer without real web tool use is invalid.',
       localTimeNote,
+      '- Be evidence-first and synthesis-heavy: gather what matters, then answer cleanly in your own voice.',
       '- If the user asks you to do that live/external work at a future time or on a recurring schedule, do not do it now. Use the correct scheduling tool instead.',
       '- Exact-time examples: "at 12 PM", "today at 6", "tomorrow at 9", "in 30 minutes", "every weekday at 8 AM".',
       '- Schedule mapping: use schedule_once_task for one-time times and pass the phrase in "when"; use schedule_recurring_task for recurring calendar times and pass the phrase in "recurrence"; use schedule_interval_task only for repeated elapsed intervals like "every 5 minutes" and pass the phrase in "every".',
@@ -1787,10 +1992,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       '- Do not call register_watch for a fixed-time reminder or a timed recurring job.',
       '- Use web_search for current or external facts.',
       '- Use web_fetch when you have a URL or a search result to read.',
+      '- Do not answer from stale knowledge or claim web access is unavailable unless a web tool actually failed.',
       '- Use browser tools only on browser-operation turns, not on web-lookup turns.',
       '- Base the final answer on fetched page content or structured search results, never raw search engine chrome.',
       '- Write a clean, well-structured response — never paste raw "Search provider:", "Search results:", or URL dump lines into your reply.',
-      '- Synthesize the information into a conversational, engaging answer with your own personality.',
+      '- Keep the answer current, concrete, and source-aware without sounding like a report template.',
     ].filter(Boolean).join('\n');
   }
 
@@ -1833,6 +2039,110 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     // e.g. web_search("query") or search("query"). Treat as stale-knowledge fallback.
     if (/^\s*(web_search|search|browse_web|fetch_web)\s*\(/.test(text)) {
       return true;
+    }
+    return false;
+  }
+
+  private looksLikeTextualToolCall(
+    text: string,
+    contract: RouteToolContract,
+  ): boolean {
+    return Boolean(this.parseTextualToolCall(text, contract));
+  }
+
+  private parseTextualToolCall(
+    text: string,
+    contract: RouteToolContract,
+  ): { toolName: string; args: Record<string, unknown> } | null {
+    const trimmed = text.trim();
+    if (!trimmed || !contract.required) return null;
+
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        tool?: unknown;
+        parameters?: unknown;
+        function?: { name?: unknown; arguments?: unknown };
+      };
+      if (
+        typeof parsed.tool === 'string' &&
+        this.textualToolCallMatchesContract(parsed.tool, contract)
+      ) {
+        return {
+          toolName: parsed.tool,
+          args:
+            parsed.parameters && typeof parsed.parameters === 'object'
+              ? (parsed.parameters as Record<string, unknown>)
+              : {},
+        };
+      }
+      if (
+        parsed.function &&
+        typeof parsed.function.name === 'string' &&
+        this.textualToolCallMatchesContract(parsed.function.name, contract)
+      ) {
+        let args: Record<string, unknown> = {};
+        if (
+          parsed.function.arguments &&
+          typeof parsed.function.arguments === 'object'
+        ) {
+          args = parsed.function.arguments as Record<string, unknown>;
+        } else if (typeof parsed.function.arguments === 'string') {
+          try {
+            const parsedArgs = JSON.parse(parsed.function.arguments);
+            if (parsedArgs && typeof parsedArgs === 'object') {
+              args = parsedArgs as Record<string, unknown>;
+            }
+          } catch {
+            args = {};
+          }
+        }
+        return {
+          toolName: parsed.function.name,
+          args,
+        };
+      }
+    } catch {
+      // fall through to regex checks
+    }
+
+    const directMatch = trimmed.match(
+      /^\s*(?:\{\s*"tool"\s*:\s*"([^"]+)"|([a-z_][a-z0-9_]*)\s*\()/i,
+    );
+    const candidateTool = (directMatch?.[1] || directMatch?.[2] || '').trim();
+    if (!candidateTool) return null;
+    if (!this.textualToolCallMatchesContract(candidateTool, contract)) {
+      return null;
+    }
+    return {
+      toolName: candidateTool,
+      args: {},
+    };
+  }
+
+  private textualToolCallMatchesContract(
+    toolName: string,
+    contract: RouteToolContract,
+  ): boolean {
+    if (contract.satisfyingToolNames?.includes(toolName)) return true;
+    if (contract.requiredFamilies.includes('host_files')) {
+      return /^(list_host_entries|read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/.test(
+        toolName,
+      );
+    }
+    if (contract.requiredFamilies.includes('web')) {
+      return /^(web_search|web_fetch|web_open_url|web_extract_text|web_get_links|web_close|web_browse)$/.test(
+        toolName,
+      );
+    }
+    if (contract.requiredFamilies.includes('browser')) {
+      return /^(browser_open_url|browser_snapshot|browser_click|browser_type|browser_select|browser_extract_text|browser_screenshot|browser_tabs|browser_close)$/.test(
+        toolName,
+      );
+    }
+    if (contract.requiredFamilies.includes('meta')) {
+      return /^(schedule_task|schedule_once_task|schedule_recurring_task|schedule_interval_task|register_watch)$/.test(
+        toolName,
+      );
     }
     return false;
   }
@@ -2226,7 +2536,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       );
     }
 
-    const { registry: baseRegistry, tools: baseTools, webEnabled, browserEnabled } = this.availableTools(req);
+    const {
+      registry: baseRegistry,
+      tools: baseTools,
+      webEnabled,
+      browserEnabled,
+      hostFilesEnabled,
+    } = this.availableTools(req);
 
     // Initialize planner-critic state and inject meta tools
     const plannerConfig = req.config.plannerCritic ?? {
@@ -2265,19 +2581,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       !schedulingIntent && !watchIntent
         ? baseRegistry.filter((tool) => {
             if (route === 'plain_response') {
-              return (
-                tool.family === 'memory' ||
-                tool.name === 'schedule_task' ||
-                tool.name === 'register_watch'
-              );
+              return tool.family === 'memory';
+            }
+            if (route === 'host_file_operation') {
+              return tool.family === 'host_files' || tool.family === 'memory';
             }
             if (route === 'web_lookup') {
-              return (
-                tool.family === 'web' ||
-                tool.family === 'memory' ||
-                tool.name === 'schedule_task' ||
-                tool.name === 'register_watch'
-              );
+              return tool.family === 'web' || tool.family === 'memory';
             }
             return true;
           })
@@ -2310,6 +2620,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       this.shouldUseToolLoop(turnMode, {
         webEnabled,
         browserEnabled,
+        hostFilesEnabled,
         safeToolsPresent,
         metaToolsPresent,
       }) &&
@@ -2344,6 +2655,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         ? this.browserToolContext(req, { webEnabled })
         : this.webConfig(req);
       const messages: Array<Record<string, unknown>> = [];
+      const routeContract = this.resolveRouteToolContract({
+        route,
+        schedulingIntent,
+        watchIntent,
+      });
       const bootstrap = usingBrowserFlow
         ? this.browserBootstrap(req.prompt)
         : {};
@@ -2365,6 +2681,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         budgetChars: inputBudgetChars,
         systemBudgetRatio: isLocal ? 0.38 : 0.5,
       });
+      console.error(
+        `[openai-runtime] route=${route} turnMode=${turnMode} streaming=${useStreaming ? 1 : 0} toolLoop=1 promptChars=${req.prompt.length} priorChars=${priorMessagesChars} systemChars=${fittedPrompts.systemPrompt?.length || 0} userChars=${fittedPrompts.userPrompt.length} toolSchemaChars=${shouldUseToolLoop ? toolSchemaChars : 0} inputBudgetChars=${inputBudgetChars} maxOutputTokens=${maxOutputTokens}`,
+      );
       console.error(
         `[openai-runtime] tool-policy=${JSON.stringify(req.config.toolPolicy || {})} tools=${registry.map((tool) => tool.name).join(',') || '-'}`,
       );
@@ -2392,9 +2711,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       let lastAssistantContent = '';
       let browserRecoveryPrompted = false;
       let schedulingRecoveryPrompted = false;
+      let contractRecoveryAttempts = 0;
       let memoryFlushInjected = false;
       let terminalSchedulingResult: { ok: boolean; content: string } | null = null;
       let schedulingResolved = !schedulingIntent && !watchIntent;
+      let contractSatisfied = false;
       const bootstrapState = usingBrowserFlow
         ? await this.maybeBootstrapBrowserTurn({
             req,
@@ -2403,6 +2724,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             webEnabled,
           })
         : { used: false };
+      if (usingBrowserFlow && bootstrapState.openedUrl) {
+        contractSatisfied = true;
+      }
       let toolLoopBudgetMs = this.parsePositiveInt(
         usingBrowserFlow
           ? req.secrets?.BROWSER_TOOL_LOOP_BUDGET_MS ||
@@ -2429,6 +2753,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             } = this.activeToolsForTurn({
               baseRegistry: routePrunedRegistry,
               baseTools: toOpenAITools(routePrunedRegistry),
+              route,
+              prompt: req.prompt,
               plannerState,
               planningIntensity,
               sawToolCalls: sawToolCalls && schedulingResolved,
@@ -2444,7 +2770,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               tool_choice: this.resolveToolChoice({
                 usingBrowserFlow,
                 usingWebFlow: webEnabled && route === 'web_lookup',
+                usingHostFileFlow: route === 'host_file_operation',
                 sawToolCalls: sawToolCalls && schedulingResolved,
+                contractSatisfied,
                 bootstrapUsed: bootstrapState.used,
                 prompt: req.prompt,
                 planningIntensity,
@@ -2545,6 +2873,88 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
             if (content) lastAssistantContent = content;
             if (toolCalls.length === 0) {
+              const parsedTextualToolCall =
+                content
+                  ? this.parseTextualToolCall(content, routeContract)
+                  : null;
+              const looksLikeInvalidTextualToolCall =
+                Boolean(parsedTextualToolCall);
+              if (parsedTextualToolCall) {
+                const textualHandler =
+                  findTool(activeRegistry, parsedTextualToolCall.toolName) ||
+                  findTool(routePrunedRegistry, parsedTextualToolCall.toolName);
+                if (textualHandler) {
+                  console.error(
+                    `[openai-runtime] recovered textual tool call: ${parsedTextualToolCall.toolName}`,
+                  );
+                  const textualResult = await textualHandler.execute(
+                    parsedTextualToolCall.args,
+                    toolCtx,
+                  );
+                  sawToolCalls = true;
+                  if (
+                    this.toolSatisfiesContract({
+                      contract: routeContract,
+                      toolName: parsedTextualToolCall.toolName,
+                      toolFamily: textualHandler.family,
+                      ok: textualResult.ok,
+                    })
+                  ) {
+                    contractSatisfied = true;
+                  }
+                  this.appendSyntheticToolResult({
+                    messages,
+                    toolName: parsedTextualToolCall.toolName,
+                    args: parsedTextualToolCall.args,
+                    result: textualResult,
+                    idSuffix: `textual-${i}`,
+                  });
+                  lastAssistantContent = '';
+                  if (
+                    routeContract.required &&
+                    !contractSatisfied &&
+                    contractRecoveryAttempts < 2
+                  ) {
+                    contractRecoveryAttempts += 1;
+                    messages.push({
+                      role: 'user',
+                      content: routeContract.retryInstruction,
+                    });
+                  }
+                  continue;
+                }
+              }
+              const shouldSkipContractRetryForWebFallback =
+                route === 'web_lookup' &&
+                Boolean(content) &&
+                !looksLikeInvalidTextualToolCall &&
+                (
+                  this.looksLikeContextRefusal(content) ||
+                  this.looksLikeStaleKnowledgeFallback(content) ||
+                  this.looksLikeNoRealtimeDisclaimer(content)
+                );
+              if (
+                routeContract.required &&
+                !contractSatisfied &&
+                !shouldSkipContractRetryForWebFallback &&
+                contractRecoveryAttempts < 2
+              ) {
+                contractRecoveryAttempts += 1;
+                if (content) {
+                  messages.push({
+                    role: 'assistant',
+                    content,
+                  });
+                }
+                messages.push({
+                  role: 'user',
+                  content: looksLikeInvalidTextualToolCall
+                    ? `${routeContract.retryInstruction} Do not print JSON, function notation, or a fake tool payload as assistant text. Make a real structured tool call instead.`
+                    : routeContract.retryInstruction,
+                });
+                lastAssistantContent = '';
+                continue;
+              }
               if (
                 !sawToolCalls &&
                 (schedulingIntent || watchIntent) &&
@@ -2596,10 +3006,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               tool_calls: toolCalls,
             });
 
+            let contractSatisfiedThisIteration = false;
             for (const call of toolCalls) {
               const toolName = call.function?.name || '';
               console.error(`[openai-runtime] tool call: ${toolName}`);
-              const handler = findTool(activeRegistry, toolName);
+              const handler =
+                findTool(activeRegistry, toolName) ||
+                findTool(routePrunedRegistry, toolName);
               const argsText = call.function?.arguments || '{}';
               let args: Record<string, unknown> = {};
               try {
@@ -2668,6 +3081,25 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
                   schedulingResolved = false;
                 }
               }
+              if (
+                routeContract.label === 'host_file_operation' &&
+                handler?.family === 'host_files' &&
+                toolName !== 'list_host_directories'
+              ) {
+                contractSatisfied = true;
+                contractSatisfiedThisIteration = true;
+              }
+              if (
+                this.toolSatisfiesContract({
+                  contract: routeContract,
+                  toolName,
+                  toolFamily: handler?.family,
+                  ok: schedulingToolResult.ok,
+                })
+              ) {
+                contractSatisfied = true;
+                contractSatisfiedThisIteration = true;
+              }
               if (toolName === 'web_search' && result.ok) {
                 const query =
                   typeof args.query === 'string'
@@ -2705,6 +3137,19 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             }
             if (terminalSchedulingResult) {
               break;
+            }
+            if (
+              routeContract.required &&
+              !contractSatisfied &&
+              !contractSatisfiedThisIteration &&
+              contractRecoveryAttempts < 2
+            ) {
+              contractRecoveryAttempts += 1;
+              messages.push({
+                role: 'user',
+                content: routeContract.retryInstruction,
+              });
+              continue;
             }
             // Inject plan progress note after all tool results for this turn
             if (plannerState?.plan) {
@@ -2751,6 +3196,14 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         if (terminalSchedulingResult) {
           return buildResponse(terminalSchedulingResult.content);
         }
+        if (
+          routeContract.required &&
+          route !== 'web_lookup' &&
+          !contractSatisfied &&
+          !sawToolCalls
+        ) {
+          return buildResponse(routeContract.failureMessage);
+        }
         if (sawToolCalls && !visibleAssistantContent) {
           const synthesized = await this.runFinalToolSynthesis({
             messages,
@@ -2791,6 +3244,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               explicitWebIntent &&
               (
                 !visibleAssistantContent ||
+                this.looksLikeContextRefusal(
+                  visibleAssistantContent || lastAssistantContent,
+                ) ||
+                this.looksLikeNoRealtimeDisclaimer(
+                  visibleAssistantContent || lastAssistantContent,
+                ) ||
                 this.looksLikeStaleKnowledgeFallback(
                   visibleAssistantContent || lastAssistantContent,
                 )
@@ -2836,6 +3295,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           console.error(
             `[openai-runtime] completed turn path=${sawToolCalls ? 'tool-assisted' : 'conversational'} finalText=${visibleAssistantContent.length}`,
           );
+          if (routeContract.required && !contractSatisfied) {
+            return buildResponse(routeContract.failureMessage);
+          }
           if (usingBrowserFlow && !sawToolCalls) {
             console.error(
               '[openai-runtime] browser-operation turn completed without any tool calls',
@@ -2895,6 +3357,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               ? 0.38
               : 0.5,
       });
+      console.error(
+        `[openai-runtime] route=${route} turnMode=${turnMode} streaming=${useStreaming ? 1 : 0} toolLoop=0 promptChars=${req.prompt.length} priorChars=${priorMessagesChars} systemChars=${fittedSimplePrompts.systemPrompt?.length || 0} userChars=${fittedSimplePrompts.userPrompt.length} toolSchemaChars=0 inputBudgetChars=${inputBudgetChars} maxOutputTokens=${maxOutputTokens}`,
+      );
       if (supportsResponses) {
         try {
           const requestBody = fittedSimplePrompts.systemPrompt
@@ -2943,7 +3408,10 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         // so smaller values improve TTFT.
         max_tokens:
           turnMode === 'conversational' && !isLocal
-            ? Math.min(maxOutputTokens, 1536)
+            ? Math.min(
+                maxOutputTokens,
+                OpenAIRuntimeAdapter.CLOUD_CONVERSATIONAL_MAX_OUTPUT_TOKENS,
+              )
             : maxOutputTokens,
       };
       if (useStreaming) {
@@ -3029,6 +3497,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
   private effectiveCapabilityRoute(req: RuntimeRequest):
     | 'plain_response'
+    | 'host_file_operation'
     | 'web_lookup'
     | 'browser_operation'
     | 'deny_or_escalate' {

@@ -117,7 +117,7 @@ export async function run(_args: string[]): Promise<void> {
   if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
     if (
-      /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY)=/m.test(
+      /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|ONECLI_URL)=/m.test(
         envContent,
       )
     ) {

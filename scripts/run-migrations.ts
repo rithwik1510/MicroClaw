@@ -3,7 +3,15 @@ import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
-import { compareSemver } from '../skills-engine/state.js';
+function compareSemver(a: string, b: string): number {
+  const partsA = a.split('.').map(Number);
+  const partsB = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const diff = (partsA[i] || 0) - (partsB[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 const fromVersion = process.argv[2];
 const toVersion = process.argv[3];

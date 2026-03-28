@@ -15,8 +15,9 @@
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { createRuntimeAdapter } from './runtime/factory.js';
 import { resolveExternalRuntimeBudgets } from './runtime/budgets.js';
@@ -42,6 +43,8 @@ interface ExternalSessionState {
   priorMessages: ConversationMessage[];
   /** Session ID carried across turns for consistent host tracking. */
   sessionId: string | undefined;
+  /** Last capability route used for this warm session. */
+  lastCapabilityRoute?: RuntimeConfig['capabilityRoute'];
 }
 
 interface ContainerInput {
@@ -100,17 +103,96 @@ const IPC_POLL_MS = Math.max(
   Number.parseInt(process.env.NANOCLAW_AGENT_IPC_POLL_MS || '100', 10) || 100,
 );
 
-// Maximum warm-session history to keep in memory. Prevents unbounded context
-// growth which increases TTFT linearly with conversation length.
-// Each "pair" is one user turn + one assistant turn.
-const MAX_PRIOR_PAIRS = Math.max(
-  1,
-  Number.parseInt(process.env.OPENAI_MAX_PRIOR_TURNS || '10', 10) || 10,
-);
 const MAX_PRIOR_CHARS = Math.max(
   2000,
   Number.parseInt(process.env.OPENAI_MAX_PRIOR_CHARS || '16000', 10) || 16000,
 );
+const WARM_RECENT_PAIRS = Math.max(
+  1,
+  Number.parseInt(process.env.OPENAI_WARM_RECENT_PAIRS || '2', 10) || 2,
+);
+const WARM_SUMMARY_MAX_CHARS = Math.max(
+  600,
+  Number.parseInt(process.env.OPENAI_WARM_SUMMARY_MAX_CHARS || '1800', 10) || 1800,
+);
+
+function groupWorkspaceDir(): string {
+  return process.env.NANOCLAW_GROUP_WORKSPACE_DIR || '/workspace/group';
+}
+
+function globalWorkspaceDir(): string {
+  return process.env.NANOCLAW_GLOBAL_WORKSPACE_DIR || '/workspace/global';
+}
+
+function sessionHomeDir(): string {
+  return process.env.NANOCLAW_SESSION_HOME_DIR || path.join(os.homedir(), '.claude');
+}
+
+function compactWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function excerptTurn(text: string, maxChars = 180): string {
+  const compact = compactWhitespace(text)
+    .replace(/\[Current message - respond to this\]/g, '')
+    .replace(/\[Previous conversation summary\]/g, '')
+    .trim();
+  if (!compact) return '';
+  return compact.length <= maxChars ? compact : `${compact.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+function buildWarmHistorySummary(messages: ConversationMessage[]): string | null {
+  const bullets: string[] = [];
+  for (let i = 0; i < messages.length; i += 2) {
+    const user = messages[i];
+    const assistant = messages[i + 1];
+    if (!user || user.role !== 'user') continue;
+    const userText = excerptTurn(user.content, 140);
+    const assistantText = assistant?.role === 'assistant'
+      ? excerptTurn(assistant.content, 180)
+      : '';
+    if (!userText && !assistantText) continue;
+    if (assistantText) {
+      bullets.push(`- User topic: ${userText}\n  Assistant outcome: ${assistantText}`);
+    } else {
+      bullets.push(`- User topic: ${userText}`);
+    }
+  }
+
+  if (bullets.length === 0) return null;
+  const joined = ['[Warm session summary]', ...bullets].join('\n');
+  return joined.length <= WARM_SUMMARY_MAX_CHARS
+    ? joined
+    : `${joined.slice(0, WARM_SUMMARY_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function compactWarmPriorMessages(messages: ConversationMessage[]): ConversationMessage[] {
+  if (messages.length <= WARM_RECENT_PAIRS * 2) return messages;
+
+  const recentCount = WARM_RECENT_PAIRS * 2;
+  const older = messages.slice(0, -recentCount);
+  const recent = messages.slice(-recentCount);
+  const summary = buildWarmHistorySummary(older);
+  const compacted = summary
+    ? [{ role: 'assistant', content: summary } as ConversationMessage, ...recent]
+    : recent;
+
+  let totalChars = compacted.reduce((sum, message) => sum + message.content.length, 0);
+  while (totalChars > MAX_PRIOR_CHARS && compacted.length > 2) {
+    const removeIndex = compacted[0].content.startsWith('[Warm session summary]') ? 1 : 0;
+    const removed = compacted.splice(removeIndex, Math.min(2, compacted.length - removeIndex));
+    totalChars -= removed.reduce((sum, message) => sum + message.content.length, 0);
+  }
+
+  if (totalChars > MAX_PRIOR_CHARS && compacted[0]?.content.startsWith('[Warm session summary]')) {
+    compacted[0] = {
+      ...compacted[0],
+      content: excerptTurn(compacted[0].content, Math.max(320, MAX_PRIOR_CHARS - 400)),
+    };
+  }
+
+  return compacted;
+}
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -188,8 +270,8 @@ function loadLegacySystemPrompt(containerInput: ContainerInput): string[] {
   }
 
   const prompts: string[] = [];
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  const localClaudeMdPath = '/workspace/group/CLAUDE.md';
+  const globalClaudeMdPath = path.join(globalWorkspaceDir(), 'CLAUDE.md');
+  const localClaudeMdPath = path.join(groupWorkspaceDir(), 'CLAUDE.md');
 
   if (fs.existsSync(globalClaudeMdPath)) {
     prompts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8').trim());
@@ -260,7 +342,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       const summary = getSessionSummary(sessionId, transcriptPath);
       const name = summary ? sanitizeFilename(summary) : generateFallbackName();
 
-      const conversationsDir = '/workspace/group/conversations';
+      const conversationsDir = path.join(groupWorkspaceDir(), 'conversations');
       fs.mkdirSync(conversationsDir, { recursive: true });
 
       const date = new Date().toISOString().split('T')[0];
@@ -276,30 +358,6 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     }
 
     return {};
-  };
-}
-
-// Secrets to strip from Bash tool subprocess environments.
-// These are needed by claude-code for API auth but should never
-// be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
-
-function createSanitizeBashHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preInput = input as PreToolUseHookInput;
-    const command = (preInput.tool_input as { command?: string })?.command;
-    if (!command) return {};
-
-    const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        updatedInput: {
-          ...(preInput.tool_input as Record<string, unknown>),
-          command: unsetPrefix + command,
-        },
-      },
-    };
   };
 }
 
@@ -488,15 +546,33 @@ async function runQuery(
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMd = buildSystemPrompt(containerInput);
 
-  // Discover additional directories mounted at /workspace/extra/*
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
+  // Discover additional directories: native mode uses NANOCLAW_HOST_DIRECTORIES env var,
+  // Docker mode falls back to scanning /workspace/extra/* subdirectories.
   const extraDirs: string[] = [];
-  const extraBase = '/workspace/extra';
-  if (fs.existsSync(extraBase)) {
-    for (const entry of fs.readdirSync(extraBase)) {
-      const fullPath = path.join(extraBase, entry);
-      if (fs.statSync(fullPath).isDirectory()) {
-        extraDirs.push(fullPath);
+  const hostDirsEnv = process.env.NANOCLAW_HOST_DIRECTORIES;
+  if (hostDirsEnv) {
+    try {
+      const config = JSON.parse(hostDirsEnv) as { directories: Array<{ path: string }> };
+      for (const d of config.directories) {
+        if (d.path && fs.existsSync(d.path)) {
+          extraDirs.push(d.path);
+        }
+      }
+    } catch {
+      // ignore malformed env
+    }
+  }
+  if (extraDirs.length === 0) {
+    // Docker fallback: scan /workspace/extra/*
+    const extraBase = '/workspace/extra';
+    if (fs.existsSync(extraBase)) {
+      for (const entry of fs.readdirSync(extraBase)) {
+        const fullPath = path.join(extraBase, entry);
+        try {
+          if (fs.statSync(fullPath).isDirectory()) {
+            extraDirs.push(fullPath);
+          }
+        } catch { /* ignore */ }
       }
     }
   }
@@ -507,7 +583,7 @@ async function runQuery(
   for await (const message of query({
     prompt: stream,
     options: {
-      cwd: '/workspace/group',
+      cwd: groupWorkspaceDir(),
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -536,12 +612,19 @@ async function runQuery(
             NANOCLAW_CHAT_JID: containerInput.chatJid,
             NANOCLAW_GROUP_FOLDER: containerInput.groupFolder,
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
+            // Pass IPC dir so the MCP server uses the correct path in native mode
+            ...(process.env.NANOCLAW_IPC_INPUT_DIR
+              ? { NANOCLAW_IPC_INPUT_DIR: process.env.NANOCLAW_IPC_INPUT_DIR }
+              : {}),
+            // Pass host directories config so list_host_directories works in native mode
+            ...(process.env.NANOCLAW_HOST_DIRECTORIES
+              ? { NANOCLAW_HOST_DIRECTORIES: process.env.NANOCLAW_HOST_DIRECTORIES }
+              : {}),
           },
         },
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
       },
     }
   })) {
@@ -594,6 +677,7 @@ function createExternalSessionState(
     systemPrompt: buildSystemPrompt(containerInput),
     priorMessages: [],
     sessionId,
+    lastCapabilityRoute: runtimeConfig.capabilityRoute,
   };
 }
 
@@ -608,6 +692,18 @@ async function runExternalRuntimeQuery(
   }
 
   const runtimeConfig = getRuntimeConfig(containerInput);
+  const currentRoute = runtimeConfig.capabilityRoute;
+  if (
+    sessionState.lastCapabilityRoute &&
+    currentRoute &&
+    sessionState.lastCapabilityRoute !== currentRoute
+  ) {
+    log(
+      `Capability route changed from ${sessionState.lastCapabilityRoute} to ${currentRoute}; clearing warm prior messages`,
+    );
+    sessionState.priorMessages = [];
+  }
+  sessionState.lastCapabilityRoute = currentRoute;
   const retry = containerInput.retryPolicy || {
     maxAttempts: 1,
     backoffMs: 0,
@@ -689,29 +785,13 @@ async function runExternalRuntimeQuery(
         },
       });
 
-      // Accumulate conversation history (user + assistant pairs) for the next warm turn.
-      // Tool call internals are omitted for simplicity — the assistant's textual response
-      // is sufficient for follow-up conversational context.
-      sessionState.priorMessages = [
+      // Carry forward a compact semantic history: keep the latest full turns
+      // and compress older pairs into a short summary instead of dragging raw chat.
+      sessionState.priorMessages = compactWarmPriorMessages([
         ...sessionState.priorMessages,
         { role: 'user', content: prompt },
         { role: 'assistant', content: response.result },
-      ];
-
-      // Trim priorMessages to prevent unbounded context growth.
-      // Keep the most recent MAX_PRIOR_PAIRS pairs, staying within the char budget.
-      // Remove oldest pairs first (always in user+assistant units of 2).
-      while (sessionState.priorMessages.length > MAX_PRIOR_PAIRS * 2) {
-        sessionState.priorMessages.splice(0, 2);
-      }
-      let priorChars = sessionState.priorMessages.reduce(
-        (sum, m) => sum + m.content.length,
-        0,
-      );
-      while (priorChars > MAX_PRIOR_CHARS && sessionState.priorMessages.length >= 2) {
-        const removed = sessionState.priorMessages.splice(0, 2);
-        priorChars -= removed[0].content.length + removed[1].content.length;
-      }
+      ]);
 
       // Carry the session ID forward so it stays stable across warm turns.
       if (response.sessionId) {
@@ -768,7 +848,6 @@ async function main(): Promise<void> {
   try {
     const stdinData = await readStdin();
     containerInput = JSON.parse(stdinData);
-    // Delete the temp file the entrypoint wrote — it contains secrets
     try { fs.unlinkSync('/tmp/input.json'); } catch { /* may not exist */ }
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
@@ -780,12 +859,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Build SDK env: merge secrets into process.env for the SDK only.
-  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
+  // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.
+  // No real secrets exist in the container environment.
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
-  for (const [key, value] of Object.entries(containerInput.secrets || {})) {
-    sdkEnv[key] = value;
-  }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');

@@ -103,6 +103,7 @@ describe('OpenAIRuntimeAdapter', () => {
     fs.rmSync(testIpcBase, { recursive: true, force: true });
     fs.mkdirSync(path.join(testIpcBase, 'input'), { recursive: true });
     process.env.NANOCLAW_IPC_INPUT_DIR = path.join(testIpcBase, 'input');
+    delete process.env.NANOCLAW_HOST_DIRECTORIES;
   });
 
   it('does not force web prefetch when the model declines tool use on its own', async () => {
@@ -216,40 +217,112 @@ describe('OpenAIRuntimeAdapter', () => {
     });
   });
 
-  it('keeps conversational output when the model answers without calling web tools', async () => {
-    mockPostJson.mockResolvedValueOnce({
-      choices: [
-        {
-          message: {
-            content:
-              "I can't provide real-time updates right now without web access.",
-            tool_calls: [],
+  it('retries web turns instead of accepting a no-tool fallback answer', async () => {
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content:
+                'I need to inspect live sources before I answer.',
+              tool_calls: [],
+            },
           },
-        },
-      ],
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'tool-web-1',
+                  type: 'function',
+                  function: {
+                    name: 'web_search',
+                    arguments: JSON.stringify({ query: 'weather in hyderabad india' }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: 'It is currently warm in Hyderabad with seasonal heat.',
+              tool_calls: [],
+            },
+          },
+        ],
+      });
+    mockExecuteWebSearch.mockResolvedValueOnce({
+      ok: true,
+      restricted: false,
+      content: 'Search results:\n1. Weather | https://example.com/weather | Warm in Hyderabad.',
     });
     const adapter = new OpenAIRuntimeAdapter();
     const res = await adapter.run(
       baseRequest({
-        prompt:
-          '<messages>\n<message sender="rishi" time="2026-03-05T09:52:52.406Z">search for weather in hyderabad, india</message>\n</messages>',
+        prompt: 'search for weather in hyderabad, india',
+        config: withCapabilityRoute(baseRequest().config, 'web_lookup'),
       }),
     );
 
-    expect(mockExecuteWebSearch).not.toHaveBeenCalled();
-    expect(res.result).toContain("can't provide real-time updates");
+    expect(mockExecuteWebSearch).toHaveBeenCalledTimes(1);
+    const retryPayload = mockPostJson.mock.calls[1]?.[1] as {
+      messages: Array<{ role: string; content?: string }>;
+      tool_choice?: unknown;
+    };
+    expect(retryPayload.tool_choice).toBe('required');
+    expect(
+      retryPayload.messages.some(
+        (message) =>
+          message.role === 'user' &&
+          (message.content || '').includes('This is still a web-lookup turn.'),
+      ),
+    ).toBe(true);
+    expect(res.result).toContain('Hyderabad');
   });
 
   it('does not expose planner tools for simple web lookup turns', async () => {
-    mockPostJson.mockResolvedValueOnce({
-      choices: [
-        {
-          message: {
-            content: 'The latest AI news is changing quickly.',
-            tool_calls: [],
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'tool-web-simple',
+                  type: 'function',
+                  function: {
+                    name: 'web_search',
+                    arguments: JSON.stringify({ query: 'latest AI news' }),
+                  },
+                },
+              ],
+            },
           },
-        },
-      ],
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: 'The latest AI news is changing quickly.',
+              tool_calls: [],
+            },
+          },
+        ],
+      });
+    mockExecuteWebSearch.mockResolvedValueOnce({
+      ok: true,
+      restricted: false,
+      content: 'Search results:\n1. AI News | https://example.com/news | Latest AI news.',
     });
 
     const adapter = new OpenAIRuntimeAdapter();
@@ -266,6 +339,36 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(names).toContain('web_search');
     expect(names).not.toContain('create_plan');
     expect(names).not.toContain('critique_response');
+  });
+
+  it('removes scheduling tools from ordinary plain-response turns', async () => {
+    mockPostJson.mockResolvedValueOnce({
+      choices: [
+        {
+          message: {
+            content: 'Hello there.',
+            tool_calls: [],
+          },
+        },
+      ],
+    });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    await adapter.run(
+      baseRequest({
+        prompt: 'hi',
+        config: withCapabilityRoute(baseRequest().config, 'plain_response'),
+      }),
+    );
+
+    const payload = mockPostJson.mock.calls[0]?.[1] as {
+      tools?: Array<{ function?: { name?: string } }>;
+    };
+    const names = toolNamesFromPayload(payload);
+    expect(names).toContain('remember_this');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
   });
 
   it('forces future live-work prompts through scheduling tools before allowing a final answer', async () => {
@@ -332,13 +435,6 @@ describe('OpenAIRuntimeAdapter', () => {
       tools?: Array<{ function?: { name?: string } }>;
       tool_choice?: unknown;
     };
-    const systemMessage = firstPayload.messages.find((message) => message.role === 'system');
-    expect(systemMessage?.content).toContain(
-      'Use schedule_once_task for one-time future times, schedule_recurring_task for recurring calendar times, and schedule_interval_task only for elapsed intervals.',
-    );
-    expect(systemMessage?.content).toContain(
-      'Do not reach for web or browser work unless this turn explicitly allows it.',
-    );
     const firstNames = toolNamesFromPayload(firstPayload);
     expect(firstNames).toEqual(['schedule_once_task']);
     expect(firstPayload.tool_choice).toBe('required');
@@ -351,13 +447,6 @@ describe('OpenAIRuntimeAdapter', () => {
     const secondNames = toolNamesFromPayload(secondPayload);
     expect(secondNames).toEqual(['schedule_once_task']);
     expect(secondPayload.tool_choice).toBe('required');
-    expect(
-      secondPayload.messages.some(
-        (message) =>
-          message.role === 'system' &&
-          (message.content || '').includes('This request is a scheduling turn.'),
-      ),
-    ).toBe(true);
     expect(res.result).toContain('Scheduled task for this chat');
   });
 
@@ -473,26 +562,131 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(res.result).toContain('Scheduled task for this chat');
   });
 
-  it('lets the model stay conversational for a verbose prompt if it does not call tools', async () => {
-    mockPostJson.mockResolvedValueOnce({
-      choices: [
-        {
-          message: {
-            content: "I can't provide real-time updates right now without web access.",
-            tool_calls: [],
+  it('returns a clear host-file failure when the model keeps avoiding host-file tools', async () => {
+    mockPostJson
+      .mockResolvedValue({
+        choices: [
+          {
+            message: {
+              content:
+                "I don't have direct visibility into the files on your computer unless you share them with me.",
+              tool_calls: [],
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
     const adapter = new OpenAIRuntimeAdapter();
     const res = await adapter.run(
       baseRequest({
-        prompt: 'which is best coding model in the world as of recent releases is??',
+        prompt: 'can you see my desktop folders?',
+        config: withCapabilityRoute(baseRequest().config, 'host_file_operation'),
       }),
     );
 
-    expect(mockExecuteWebSearch).not.toHaveBeenCalled();
-    expect(res.result).toContain("can't provide real-time updates");
+    expect(mockPostJson).toHaveBeenCalledTimes(3);
+    const firstPayload = mockPostJson.mock.calls[0]?.[1] as {
+      tools?: Array<{ function?: { name?: string } }>;
+      tool_choice?: unknown;
+    };
+    expect(firstPayload.tool_choice).toBe('required');
+    expect(res.result).toContain("couldn't complete a valid file-access step");
+  });
+
+  it('retries host-file turns when the model prints a fake move_host_path tool payload as text', async () => {
+    const desktopDir = path.join(testIpcBase, 'Desktop');
+    const projectsDir = path.join(desktopDir, 'Projects');
+    const sourceDir = path.join(desktopDir, 'Fridge recipe');
+    const destinationDir = path.join(projectsDir, 'Fridge recipe');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(projectsDir, { recursive: true });
+    process.env.NANOCLAW_HOST_DIRECTORIES = JSON.stringify({
+      directories: [
+        {
+          path: desktopDir,
+          label: 'Desktop',
+          readonly: false,
+        },
+      ],
+    });
+
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                {
+                  tool: 'move_host_path',
+                  parameters: {
+                    source_path: sourceDir,
+                    destination_path: destinationDir,
+                  },
+                },
+                null,
+                2,
+              ),
+              tool_calls: [],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: '',
+              tool_calls: [
+                {
+                  id: 'tool-host-move-1',
+                  type: 'function',
+                  function: {
+                    name: 'move_host_path',
+                    arguments: JSON.stringify({
+                      source_path: sourceDir,
+                      destination_path: destinationDir,
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: 'Moved the folder successfully.',
+              tool_calls: [],
+            },
+          },
+        ],
+      });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    const res = await adapter.run(
+      baseRequest({
+        prompt:
+          'Move the Fridge recipe folder into the Projects folder on my desktop.',
+        config: withCapabilityRoute(
+          baseRequest().config,
+          'host_file_operation',
+        ),
+      }),
+    );
+
+    expect(mockPostJson).toHaveBeenCalledTimes(3);
+    const retryPayload = mockPostJson.mock.calls[1]?.[1] as {
+      messages: Array<{ role: string; content?: string }>;
+      tool_choice?: unknown;
+    };
+    const retryMessage = retryPayload.messages[retryPayload.messages.length - 1];
+    expect(retryPayload.tool_choice).toBe('required');
+    expect(retryMessage?.content).toContain(
+      'This is still a host-file turn. Use the native host-file tools now.',
+    );
+    expect(mockPostJson).toHaveBeenCalledTimes(3);
+    expect(typeof res.result).toBe('string');
   });
 
   it('uses best-effort answer when web context refusal text is returned', async () => {
@@ -699,7 +893,7 @@ describe('OpenAIRuntimeAdapter', () => {
     );
   });
 
-  it('exposes safe state tools on plain-response turns so the model can schedule or remember', async () => {
+  it('keeps plain-response turns limited to safe memory tools', async () => {
     mockPostJson.mockResolvedValueOnce({
       choices: [
         {
@@ -744,8 +938,9 @@ describe('OpenAIRuntimeAdapter', () => {
     const names = toolNamesFromPayload(payload);
     expect(payload.messages[0]?.role).toBe('system');
     expect(names).toContain('remember_this');
-    expect(names).toContain('schedule_task');
-    expect(names).toContain('register_watch');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
     expect(names).not.toContain('web_search');
   });
 
@@ -811,8 +1006,9 @@ describe('OpenAIRuntimeAdapter', () => {
     };
     const names = toolNamesFromPayload(payload);
     expect(names).toContain('remember_this');
-    expect(names).toContain('schedule_task');
-    expect(names).toContain('register_watch');
+    expect(names).toContain('memory_search');
+    expect(names).not.toContain('schedule_task');
+    expect(names).not.toContain('register_watch');
     expect(names).not.toContain('browser_open_url');
     expect(names).not.toContain('web_search');
   });
@@ -937,7 +1133,7 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(joined).toContain('hello there from the current turn');
   });
 
-  it('lets cloud plain-response turns use the full max token budget when no tool calls are made', async () => {
+  it('caps cloud plain-response turns even when no tool calls are made', async () => {
     mockPostJson.mockResolvedValueOnce({
       choices: [
         {
@@ -1988,5 +2184,15 @@ describe('OpenAIRuntimeAdapter', () => {
     expect(secondNames).toContain('browser_open_url');
     expect(firstPayload.tool_choice).toBe('required');
     expect(secondPayload.tool_choice).toBe('auto');
+  });
+});
+
+describe('host_file_operation contract', () => {
+  it('list_host_directories is not in the textual contract matcher regex', () => {
+    const contractRegex = /^(list_host_entries|read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/;
+    expect(contractRegex.test('list_host_directories')).toBe(false);
+    expect(contractRegex.test('read_host_file')).toBe(true);
+    expect(contractRegex.test('list_host_entries')).toBe(true);
+    expect(contractRegex.test('write_host_file')).toBe(true);
   });
 });
