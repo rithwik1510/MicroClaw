@@ -254,7 +254,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'list_host_directories',
       family: 'host_files',
       description:
-        'List the host computer directories currently allowed for file access. Always call this first on a host-file task unless you already have a confirmed allowed path from this conversation.',
+        'List the allowed directories on the user\'s computer. Returns paths, read/write status, and a preview of contents. ALWAYS call this first before other host-file tools.',
       schema: {
         type: 'object',
         properties: {},
@@ -266,7 +266,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'list_host_entries',
       family: 'host_files',
       description:
-        'List files and folders inside an allowed host directory.',
+        'List files and folders inside a directory. Requires "path" (absolute). Optional: "recursive" (true to descend into subfolders), "limit" (max entries, default 50).',
       schema: {
         type: 'object',
         properties: {
@@ -283,7 +283,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'read_host_file',
       family: 'host_files',
       description:
-        'Read text from a file inside an allowed host directory.',
+        'Read text content of a file. Requires "path" (absolute). Optional: "start_line" (1-based), "max_lines" (default 200), "max_chars" (default 12000).',
       schema: {
         type: 'object',
         properties: {
@@ -301,7 +301,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'write_host_file',
       family: 'host_files',
       description:
-        'Create or overwrite a text file inside an allowed writable host directory.',
+        'Create or overwrite a text file. Requires "path" (absolute) and "content" (text). To overwrite an existing file, set "mode" to "overwrite" and "confirm" to true.',
       schema: {
         type: 'object',
         properties: {
@@ -319,7 +319,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'edit_host_file',
       family: 'host_files',
       description:
-        'Edit a text file inside an allowed writable host directory by replacing exact text.',
+        'Edit a file by finding and replacing exact text. Requires "path", "search" (exact text to find), and "replace" (replacement text). Optional: "replace_all" (true to replace every occurrence).',
       schema: {
         type: 'object',
         properties: {
@@ -337,7 +337,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'glob_host_files',
       family: 'host_files',
       description:
-        'Find files under an allowed host directory using a glob pattern.',
+        'Find files matching a pattern. Requires "base_path" (directory to search) and "pattern" (e.g. "*.txt", "**/*.md"). Optional: "limit" (max results).',
       schema: {
         type: 'object',
         properties: {
@@ -354,7 +354,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'grep_host_files',
       family: 'host_files',
       description:
-        'Search text inside files under an allowed host directory.',
+        'Search for text inside files. Requires "base_path" (directory to search) and "query" (text to find). Returns matching file paths with line numbers.',
       schema: {
         type: 'object',
         properties: {
@@ -371,7 +371,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'make_host_directory',
       family: 'host_files',
       description:
-        'Create a directory inside an allowed writable host directory.',
+        'Create a new directory. Requires "path" (absolute path for the new folder). Creates parent directories automatically.',
       schema: {
         type: 'object',
         properties: {
@@ -386,7 +386,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'move_host_path',
       family: 'host_files',
       description:
-        'Move or rename a file or folder inside allowed writable host directories.',
+        'Move or rename a file or folder. Requires "source_path" and "destination_path" (both absolute). Set "confirm" to true if the destination already exists.',
       schema: {
         type: 'object',
         properties: {
@@ -403,7 +403,7 @@ export function buildToolRegistry(): ToolHandler[] {
       name: 'copy_host_path',
       family: 'host_files',
       description:
-        'Copy a file or folder from one allowed host directory path to another.',
+        'Copy a file or folder. Requires "source_path" and "destination_path" (both absolute). Copies recursively for folders.',
       schema: {
         type: 'object',
         properties: {
