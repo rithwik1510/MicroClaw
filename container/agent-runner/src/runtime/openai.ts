@@ -2783,7 +2783,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               max_tokens: isLocal
                 ? sawToolCalls
                   ? Math.min(maxOutputTokens, 700)
-                  : Math.min(maxOutputTokens, 280)
+                  : Math.min(maxOutputTokens, 512)
                 : this.resolveCloudToolLoopMaxTokens({
                     route,
                     sawToolCalls,
