@@ -1,10 +1,15 @@
 import { CapabilityRoute, RuntimeToolPolicy } from '../types.js';
 
 function currentPromptMessage(prompt: string): string {
-  const marker = '[Current message - respond to this]';
-  const index = prompt.lastIndexOf(marker);
-  if (index === -1) return prompt.trim();
-  return prompt.slice(index + marker.length).trim();
+  const markers = [
+    '[Current message - this is the only request you should answer now]',
+    '[Current message - respond to this]',
+  ];
+  for (const marker of markers) {
+    const index = prompt.lastIndexOf(marker);
+    if (index !== -1) return prompt.slice(index + marker.length).trim();
+  }
+  return prompt.trim();
 }
 
 function hasUrl(text: string): boolean {
@@ -12,13 +17,48 @@ function hasUrl(text: string): boolean {
 }
 
 function hasBrowserActionRequest(text: string): boolean {
-  return /\b(log in|login|sign in|portal|dashboard|console|open the site|open website|navigate to|click|fill (out )?the form|submit the form|browser|tab|tabs|apply on|book on|checkout|inspect the page|look around)\b/i.test(
+  return /\b(log in|login|sign in|portal|dashboard|console|open the site|open website|navigate to|click|fill (out )?the form|submit the form|browser|tab|tabs|apply on|book on|checkout|inspect the page|look around|inspect page)\b/i.test(
     text,
   );
 }
 
+function hasExplicitHostPath(text: string): boolean {
+  return /([a-z]:\\|[a-z]:\/|~[\\/]|\/users\/|\/home\/|\\\\)/i.test(text);
+}
+
+function hasHostFileRequest(text: string): boolean {
+  // Strong signals: folder names that unambiguously mean local filesystem
+  const strongFileNouns =
+    /\b(desktop|documents|downloads|onedrive|my computer|computer files|home folder|home directory)\b/i;
+  // Weak signals: generic words that need a clear file-action verb
+  const weakFileNouns =
+    /\b(file|files|folder|folders|directory|directories)\b/i;
+  // Verbs that clearly mean local file operations (not "search", "find", "update")
+  const fileActions =
+    /\b(list|open|read|write|edit|create|make|save|rename|move|copy|organize|sort|clean up|archive|glob|grep)\b/i;
+  const visibilityActions =
+    /\b(see|view|show me|what(?:'s| is) in|check|look at|access|inspect|browse)\b/i;
+  // Web signals that override weak file nouns
+  const webSignal =
+    /\b(latest|current|today|recent|news|online|web|internet|source|sources|website|uploaded|cloud)\b/i;
+
+  // Strong noun + any action = definitely file
+  if (strongFileNouns.test(text) && (fileActions.test(text) || visibilityActions.test(text))) {
+    return true;
+  }
+  // Weak noun + file-specific action, only if no competing web signal
+  if (weakFileNouns.test(text) && fileActions.test(text) && !webSignal.test(text)) {
+    return true;
+  }
+  // Weak noun + visibility, only if no competing web signal
+  if (weakFileNouns.test(text) && visibilityActions.test(text) && !webSignal.test(text)) {
+    return true;
+  }
+  return false;
+}
+
 function hasWebLookupRequest(text: string): boolean {
-  return /\b(latest|current|today|recent|news|source|sources|cite|citation|verify|verification|fact-check|price|release|update|search|lookup|look up|browse the web|find online|check online|read this page|summarize this page|fetch this)\b/i.test(
+  return /\b(latest|current|today|recent|news|source|sources|cite|citation|verify|verification|fact-check|price|release|update|search|lookup|look up|browse the web|find online|check online|read this page|summarize this page|fetch this|find on the web|search online)\b/i.test(
     text,
   );
 }
@@ -70,11 +110,11 @@ function hasAny(text: string, patterns: RegExp[]): boolean {
 }
 
 const WEB_PATTERNS = [
-  /\b(latest|current|today|recent|news|source|sources|cite|citation|verify|verification|fact-check|price|release|update|search|lookup|look up|browse the web|find online|check online|read this page|summarize this page|fetch this)\b/i,
+  /\b(latest|current|today|recent|news|source|sources|cite|citation|verify|verification|fact-check|price|release|update|search|lookup|look up|browse the web|find online|check online|read this page|summarize this page|fetch this|find on the web|search online)\b/i,
 ];
 
 const BROWSER_PATTERNS = [
-  /\b(log in|login|sign in|portal|dashboard|console|open the site|open website|navigate to|click|fill (out )?the form|submit the form|browser|tab|tabs|apply on|book on|checkout|inspect the page|look around)\b/i,
+  /\b(log in|login|sign in|portal|dashboard|console|open the site|open website|navigate to|click|fill (out )?the form|submit the form|browser|tab|tabs|apply on|book on|checkout|inspect the page|inspect page|look around)\b/i,
 ];
 
 const DENY_PATTERNS = [
@@ -110,6 +150,10 @@ export function resolveCapabilityRoute(input: {
     return 'plain_response';
   }
 
+  if (hasExplicitHostPath(current) || hasHostFileRequest(current)) {
+    return 'host_file_operation';
+  }
+
   const browserIntent =
     browserEnabled &&
     (hasBrowserActionRequest(current) ||
@@ -132,6 +176,8 @@ export function resolveCapabilityRoute(input: {
 
 export function capabilityRouteSummary(route: CapabilityRoute): string {
   switch (route) {
+    case 'host_file_operation':
+      return 'Native host-file tools allowed for this turn.';
     case 'browser_operation':
       return 'Interactive browser operation allowed for this turn.';
     case 'web_lookup':

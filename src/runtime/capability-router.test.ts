@@ -40,4 +40,142 @@ describe('resolveCapabilityRoute', () => {
 
     expect(route).toBe('plain_response');
   });
+
+  it('routes host file requests to the native host-file tool path', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Please list the files in my Desktop folder and open the newest notes file.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: {
+        web: { enabled: true },
+        browser: { enabled: true },
+      },
+    });
+
+    expect(route).toBe('host_file_operation');
+  });
+
+  it('routes visibility-style desktop folder prompts to the native host-file tool path', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Can you see my desktop folders?',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: {
+        web: { enabled: true },
+        browser: { enabled: true },
+      },
+    });
+
+    expect(route).toBe('host_file_operation');
+  });
+
+  it('routes current-events prompts to web lookup mode', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      "What are today's AI headlines?",
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: {
+        web: { enabled: true },
+        browser: { enabled: true },
+      },
+    });
+
+    expect(route).toBe('web_lookup');
+  });
+
+  it('routes interactive dashboard prompts to browser mode', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Open this dashboard and click login for me.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: {
+        web: { enabled: true },
+        browser: { enabled: true },
+      },
+    });
+
+    expect(route).toBe('browser_operation');
+  });
+
+  it('does not route "find the latest news sources" to host_file_operation', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Find the latest news sources about the AI regulation bill.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: { web: { enabled: true }, browser: { enabled: true } },
+    });
+
+    expect(route).not.toBe('host_file_operation');
+  });
+
+  it('does not route "search for project updates online" to host_file_operation', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Search for updates on the project timeline online.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: { web: { enabled: true }, browser: { enabled: true } },
+    });
+
+    expect(route).not.toBe('host_file_operation');
+  });
+
+  it('routes explicit Windows paths to host_file_operation', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Read C:\\Users\\posan\\Documents\\notes.txt and summarize it.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: { web: { enabled: true }, browser: { enabled: true } },
+    });
+
+    expect(route).toBe('host_file_operation');
+  });
+
+  it('routes "organize my Desktop folder" to host_file_operation', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'Organize my Desktop folder by moving old files into an archive subfolder.',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: { web: { enabled: true }, browser: { enabled: true } },
+    });
+
+    expect(route).toBe('host_file_operation');
+  });
+
+  it('does not route "what is the current status of my files uploaded to the website" to host_file_operation', () => {
+    const prompt = [
+      '[Current message - respond to this]',
+      'What is the current status of my files I uploaded to the website?',
+    ].join('\n');
+
+    const route = resolveCapabilityRoute({
+      prompt,
+      toolPolicy: { web: { enabled: true }, browser: { enabled: true } },
+    });
+
+    expect(route).not.toBe('host_file_operation');
+  });
 });
