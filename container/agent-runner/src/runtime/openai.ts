@@ -1379,7 +1379,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         failureMessage:
           "I entered host-file mode but couldn't complete a valid file-access step.",
         retryInstruction:
-          'This is still a host-file turn. Use the native host-file tools now. For ambiguous folder visibility requests, call list_host_directories first. Do not claim you lack local file visibility unless a host-file tool actually fails.',
+          'This is still a host-file turn. Use a host-file action tool now (read, write, edit, move, copy, glob, grep, mkdir). Do not explain, do not suggest commands, do not narrate — just call the tool.',
       };
     }
 
@@ -1940,11 +1940,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         '- This is a required host-file turn. A final answer without host-file tool use is invalid.',
         '- Call list_host_directories first unless the conversation already contains a confirmed allowed path.',
         '- Stay strictly within configured allowed directories.',
-        '- Then inspect with list_host_entries or act with the appropriate host-file tool.',
+        '- Then act with the appropriate host-file tool (read, write, edit, move, copy, glob, grep, mkdir).',
         '- Do not claim you lack local file visibility unless a host-file tool actually fails.',
         '- Do not use scheduling, browser, or web tools for local file work.',
         '- If a write would overwrite or replace existing content, require explicit confirmation from the user first.',
-        '- Mention the exact path you read or changed in the final answer, along with the concrete outcome.',
+        '- AFTER completing the action, reply in 1-2 sentences: state what you did and the exact path. Nothing else.',
+        '- Do NOT suggest manual commands, explain how the operation works, or list intermediate tool results.',
+        '- Do NOT narrate your reasoning steps. Just do the work silently, then confirm the outcome.',
       ].join('\n');
     }
     if (route === 'browser_operation') {
