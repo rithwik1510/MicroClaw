@@ -185,4 +185,44 @@ describe('host file tools', () => {
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('falls back to copy+delete when renameSync throws EPERM (OneDrive)', async () => {
+    const dir = makeTempDir();
+    const sourceDir = path.join(dir, 'src');
+    const destDir = path.join(dir, 'dest');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'file.txt'), 'content', 'utf8');
+    fs.mkdirSync(path.join(sourceDir, 'sub'));
+    fs.writeFileSync(path.join(sourceDir, 'sub', 'nested.txt'), 'nested', 'utf8');
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const move = await executeMoveHostPath(
+      { source_path: sourceDir, destination_path: path.join(destDir, 'moved') },
+      baseCtx,
+    );
+
+    expect(move.ok).toBe(true);
+    expect(fs.existsSync(path.join(destDir, 'moved', 'file.txt'))).toBe(true);
+    expect(fs.readFileSync(path.join(destDir, 'moved', 'file.txt'), 'utf8')).toBe('content');
+    expect(fs.existsSync(path.join(destDir, 'moved', 'sub', 'nested.txt'))).toBe(true);
+    expect(fs.existsSync(sourceDir)).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns error result instead of throwing on move failure', async () => {
+    const dir = makeTempDir();
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const move = await executeMoveHostPath(
+      { source_path: path.join(dir, 'nonexistent'), destination_path: path.join(dir, 'dest') },
+      baseCtx,
+    );
+
+    expect(move.ok).toBe(false);
+    expect(move.content).toContain('does not exist');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });

@@ -473,7 +473,29 @@ export async function executeMoveHostPath(
     };
   }
   fs.mkdirSync(path.dirname(destination.path), { recursive: true });
-  fs.renameSync(source.path, destination.path);
+  try {
+    fs.renameSync(source.path, destination.path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EPERM' || code === 'EXDEV') {
+      // renameSync fails on OneDrive-synced folders (EPERM) and cross-device moves (EXDEV).
+      // Fall back to copy + delete.
+      try {
+        fs.cpSync(source.path, destination.path, { recursive: true, force: true });
+        fs.rmSync(source.path, { recursive: true, force: true });
+      } catch (fallbackErr) {
+        return {
+          ok: false,
+          content: `Move failed (copy+delete fallback): ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`,
+        };
+      }
+    } else {
+      return {
+        ok: false,
+        content: `Move failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
   return {
     ok: true,
     content: `Moved ${source.path} to ${destination.path}`,
