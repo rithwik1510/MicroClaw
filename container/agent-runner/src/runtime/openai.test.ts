@@ -2189,10 +2189,10 @@ describe('OpenAIRuntimeAdapter', () => {
 
 describe('host_file_operation contract', () => {
   it('list_host_directories is not in the textual contract matcher regex', () => {
-    const contractRegex = /^(list_host_entries|read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/;
+    const contractRegex = /^(read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/;
     expect(contractRegex.test('list_host_directories')).toBe(false);
+    expect(contractRegex.test('list_host_entries')).toBe(false);
     expect(contractRegex.test('read_host_file')).toBe(true);
-    expect(contractRegex.test('list_host_entries')).toBe(true);
     expect(contractRegex.test('write_host_file')).toBe(true);
   });
 
@@ -2274,5 +2274,89 @@ describe('host_file_operation contract', () => {
     // Iteration 2: tool_choice MUST STILL be 'required' (list_host_directories didn't satisfy contract)
     // This is the key fix — previously this was 'auto', letting local models skip the action tool
     expect(secondPayload.tool_choice).toBe('required');
+  });
+
+  it('list_host_entries does not satisfy the contract — model must use an action tool', async () => {
+    // Scenario: user asks to "organize" a folder
+    // Iter 1: model calls list_host_directories → not satisfied
+    // Iter 2: model calls list_host_entries → should NOT satisfy contract
+    // Iter 3: model should still be forced (tool_choice=required) to call move_host_path
+    // Planner is disabled to isolate the contract behavior from planner forcing.
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'hf-1',
+              type: 'function',
+              function: { name: 'list_host_directories', arguments: '{}' },
+            }],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'hf-2',
+              type: 'function',
+              function: { name: 'list_host_entries', arguments: JSON.stringify({ path: '/tmp/test' }) },
+            }],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'hf-3',
+              type: 'function',
+              function: {
+                name: 'move_host_path',
+                arguments: JSON.stringify({ source_path: '/tmp/test/a.txt', destination_path: '/tmp/test/archive/a.txt' }),
+              },
+            }],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{
+          message: { content: 'Done! Moved a.txt into archive.', tool_calls: [] },
+        }],
+      });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    await adapter.run(
+      baseRequest({
+        prompt: '[Current message - respond to this]\nOrganize my Desktop folder by moving old files into archive',
+        config: {
+          provider: 'openai_compatible',
+          model: 'test-model',
+          baseUrl: 'http://localhost:1234/v1',
+          capabilityRoute: 'host_file_operation',
+          plannerCritic: { enabled: false, maxRevisionCycles: 0 },
+          toolPolicy: {},
+          capabilities: {
+            supportsResponses: false,
+            supportsChatCompletions: true,
+            supportsTools: true,
+            supportsStreaming: false,
+            requiresApiKey: false,
+            checkedAt: new Date().toISOString(),
+          },
+        },
+        secrets: { PLANNER_CRITIC_ENABLED: 'false' },
+      }),
+    );
+
+    expect(mockPostJson.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    const thirdPayload = mockPostJson.mock.calls[2]?.[1] as { tool_choice?: unknown };
+    // After list_host_directories + list_host_entries, tool_choice must STILL be 'required'
+    // because neither discovery tool satisfies the contract
+    expect(thirdPayload.tool_choice).toBe('required');
   });
 });

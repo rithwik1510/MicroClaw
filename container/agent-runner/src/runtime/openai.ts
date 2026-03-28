@@ -2124,7 +2124,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   ): boolean {
     if (contract.satisfyingToolNames?.includes(toolName)) return true;
     if (contract.requiredFamilies.includes('host_files')) {
-      return /^(list_host_entries|read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/.test(
+      return /^(read_host_file|write_host_file|edit_host_file|glob_host_files|grep_host_files|make_host_directory|move_host_path|copy_host_path)$/.test(
         toolName,
       );
     }
@@ -3083,7 +3083,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               if (
                 routeContract.label === 'host_file_operation' &&
                 handler?.family === 'host_files' &&
-                toolName !== 'list_host_directories'
+                toolName !== 'list_host_directories' &&
+                toolName !== 'list_host_entries'
               ) {
                 contractSatisfied = true;
                 contractSatisfiedThisIteration = true;
