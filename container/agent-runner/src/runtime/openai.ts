@@ -1330,7 +1330,6 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
     if (
       (input.usingHostFileFlow || input.usingWebFlow) &&
-      !input.sawToolCalls &&
       !input.contractSatisfied
     ) {
       return 'required';

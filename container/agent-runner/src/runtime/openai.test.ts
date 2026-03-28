@@ -2195,4 +2195,84 @@ describe('host_file_operation contract', () => {
     expect(contractRegex.test('list_host_entries')).toBe(true);
     expect(contractRegex.test('write_host_file')).toBe(true);
   });
+
+  it('tool_choice stays required after list_host_directories until an action tool satisfies the contract', async () => {
+    // Iteration 1: model calls list_host_directories (does NOT satisfy contract)
+    // Iteration 2: model calls list_host_entries (DOES satisfy contract)
+    // Iteration 3: model generates final text
+    mockPostJson
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'hf-1',
+              type: 'function',
+              function: {
+                name: 'list_host_directories',
+                arguments: '{}',
+              },
+            }],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: '',
+            tool_calls: [{
+              id: 'hf-2',
+              type: 'function',
+              function: {
+                name: 'list_host_entries',
+                arguments: JSON.stringify({ path: '/tmp/test' }),
+              },
+            }],
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        choices: [{
+          message: {
+            content: 'Here are your files: file1.txt, file2.txt',
+            tool_calls: [],
+          },
+        }],
+      });
+
+    const adapter = new OpenAIRuntimeAdapter();
+    const result = await adapter.run(
+      baseRequest({
+        prompt: '[Current message - respond to this]\nShow me what files are in my Desktop folder',
+        config: {
+          provider: 'openai_compatible',
+          model: 'test-model',
+          baseUrl: 'http://localhost:1234/v1',
+          capabilityRoute: 'host_file_operation',
+          toolPolicy: {},
+          capabilities: {
+            supportsResponses: false,
+            supportsChatCompletions: true,
+            supportsTools: true,
+            supportsStreaming: false,
+            requiresApiKey: false,
+            checkedAt: new Date().toISOString(),
+          },
+        },
+        secrets: {},
+      }),
+    );
+
+    // Should have made at least 2 API calls
+    expect(mockPostJson.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const firstPayload = mockPostJson.mock.calls[0]?.[1] as { tool_choice?: unknown };
+    const secondPayload = mockPostJson.mock.calls[1]?.[1] as { tool_choice?: unknown };
+
+    // Iteration 1: tool_choice MUST be 'required' (force first tool call)
+    expect(firstPayload.tool_choice).toBe('required');
+    // Iteration 2: tool_choice MUST STILL be 'required' (list_host_directories didn't satisfy contract)
+    // This is the key fix — previously this was 'auto', letting local models skip the action tool
+    expect(secondPayload.tool_choice).toBe('required');
+  });
 });
