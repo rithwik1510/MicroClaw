@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -520,6 +521,65 @@ export async function executeCopyHostPath(
     ok: true,
     content: `Copied ${source.path} to ${destination.path}`,
   };
+}
+
+const BLOCKED_COMMANDS = /\b(rm\s+-rf\s+\/|mkfs|dd\s+if=|format\s+[a-z]:|del\s+\/[sfq]|rmdir\s+\/s)\b/i;
+const EXEC_TIMEOUT_MS = 30_000;
+const EXEC_MAX_OUTPUT = 50_000;
+
+export async function executeExecHostCommand(
+  args: Record<string, unknown>,
+  _ctx: ToolExecutionContext,
+): Promise<ToolExecutionResult> {
+  const command = typeof args.command === 'string' ? args.command.trim() : '';
+  if (!command) {
+    return { ok: false, content: 'command is required.' };
+  }
+
+  const workingDir = typeof args.working_directory === 'string'
+    ? args.working_directory.trim()
+    : '';
+  if (!workingDir) {
+    return { ok: false, content: 'working_directory is required. Use a path from list_host_directories.' };
+  }
+
+  // Authorize the working directory
+  const authorized = authorizePath(workingDir, 'write');
+  if ('ok' in authorized) return authorized;
+
+  if (!fs.existsSync(authorized.path) || !fs.statSync(authorized.path).isDirectory()) {
+    return { ok: false, content: `working_directory does not exist or is not a directory: ${authorized.path}` };
+  }
+
+  // Block dangerous commands
+  if (BLOCKED_COMMANDS.test(command)) {
+    return { ok: false, content: 'Command blocked for safety. Avoid destructive system-level operations.' };
+  }
+
+  try {
+    const output = execSync(command, {
+      cwd: authorized.path,
+      timeout: EXEC_TIMEOUT_MS,
+      maxBuffer: EXEC_MAX_OUTPUT * 2,
+      encoding: 'utf8',
+      shell: process.platform === 'win32' ? 'bash' : '/bin/bash',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const trimmed = (output || '').trim().slice(0, EXEC_MAX_OUTPUT);
+    return {
+      ok: true,
+      content: trimmed || '(command completed with no output)',
+    };
+  } catch (err) {
+    const execErr = err as { stderr?: string; stdout?: string; message?: string; status?: number };
+    const stderr = (execErr.stderr || '').trim().slice(0, 2000);
+    const stdout = (execErr.stdout || '').trim().slice(0, 2000);
+    const detail = stderr || stdout || execErr.message || String(err);
+    return {
+      ok: false,
+      content: `Command failed (exit ${execErr.status ?? '?'}): ${detail}`,
+    };
+  }
 }
 
 export function __testOnly() {

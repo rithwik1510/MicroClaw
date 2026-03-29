@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   __testOnly,
   executeEditHostFile,
+  executeExecHostCommand,
   executeListHostEntries,
   executeMakeHostDirectory,
   executeMoveHostPath,
@@ -222,6 +223,87 @@ describe('host file tools', () => {
 
     expect(move.ok).toBe(false);
     expect(move.content).toContain('does not exist');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('exec_host_command', () => {
+  it('runs a shell command inside an allowed directory', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'hello.txt'), 'world', 'utf8');
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const result = await executeExecHostCommand(
+      { command: 'ls', working_directory: dir },
+      baseCtx,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.content).toContain('hello.txt');
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('can move a folder with mv', async () => {
+    const dir = makeTempDir();
+    fs.mkdirSync(path.join(dir, 'source'));
+    fs.writeFileSync(path.join(dir, 'source', 'file.txt'), 'data', 'utf8');
+    fs.mkdirSync(path.join(dir, 'dest'));
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const result = await executeExecHostCommand(
+      { command: 'mv source dest/', working_directory: dir },
+      baseCtx,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'dest', 'source', 'file.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'source'))).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects commands when working_directory is outside allowed roots', async () => {
+    const dir = makeTempDir();
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const result = await executeExecHostCommand(
+      { command: 'ls', working_directory: os.tmpdir() },
+      baseCtx,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.restricted).toBe(true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects commands in readonly directories', async () => {
+    const dir = makeTempDir();
+    setHostDirs([{ path: dir, label: 'Temp', readonly: true }]);
+
+    const result = await executeExecHostCommand(
+      { command: 'touch newfile.txt', working_directory: dir },
+      baseCtx,
+    );
+
+    expect(result.ok).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns error output on command failure', async () => {
+    const dir = makeTempDir();
+    setHostDirs([{ path: dir, label: 'Temp', readonly: false }]);
+
+    const result = await executeExecHostCommand(
+      { command: 'ls nonexistent_folder_xyz', working_directory: dir },
+      baseCtx,
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.content).toBeTruthy();
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
