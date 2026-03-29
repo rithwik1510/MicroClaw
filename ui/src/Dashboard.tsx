@@ -1,18 +1,26 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { getAgents, createAgent, createChat, getChatMessages, getSetup } from './api';
-import type { Agent, ChatMessage } from './api';
+import { getExistingGroups, createChat, getChatMessages, getSetup } from './api';
+import type { ExistingGroup, ChatMessage } from './api';
 
-interface AgentChat {
-  agent: Agent;
+interface SidebarItem {
+  id: string;       // unique key for sidebar
+  name: string;
+  folder: string;
+  source: 'existing' | 'dashboard';  // where it came from
+  jid?: string;     // dashboard JID if chat is active
+}
+
+interface ActiveChat {
+  item: SidebarItem;
   jid: string;
   messages: ChatMessage[];
 }
 
 export function Dashboard() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
-  const [chats, setChats] = useState<Record<string, AgentChat>>({});
+  const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [chats, setChats] = useState<Record<string, ActiveChat>>({});
   const [input, setInput] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
@@ -27,9 +35,17 @@ export function Dashboard() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  // Load agents and default model on mount
+  // Load existing groups and model on mount
   useEffect(() => {
-    getAgents().then(setAgents).catch(() => {});
+    getExistingGroups().then(groups => {
+      const items: SidebarItem[] = groups.map(g => ({
+        id: g.folder,
+        name: g.name,
+        folder: g.folder,
+        source: g.jid.startsWith('dashboard:') ? 'dashboard' as const : 'existing' as const,
+      }));
+      setSidebarItems(items);
+    }).catch(() => {});
     getSetup().then(data => {
       if (data.existing?.model) setDefaultModel(data.existing.model);
     }).catch(() => {});
@@ -45,13 +61,12 @@ export function Dashboard() {
       const data = JSON.parse(event.data);
       if (data.type === 'message' && data.chatJid) {
         setChats(prev => {
-          // Find which agent owns this JID
-          const agentId = Object.keys(prev).find(id => prev[id].jid === data.chatJid);
-          if (!agentId) return prev;
-          const chat = prev[agentId];
+          const itemId = Object.keys(prev).find(id => prev[id].jid === data.chatJid);
+          if (!itemId) return prev;
+          const chat = prev[itemId];
           return {
             ...prev,
-            [agentId]: {
+            [itemId]: {
               ...chat,
               messages: [...chat.messages, {
                 id: `ws-${Date.now()}`,
@@ -78,7 +93,7 @@ export function Dashboard() {
   // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chats, activeAgentId, isThinking]);
+  }, [chats, activeItemId, isThinking]);
 
   // Close attach menu when clicking outside
   useEffect(() => {
@@ -101,23 +116,24 @@ export function Dashboard() {
     el.style.height = Math.min(el.scrollHeight, 140) + 'px';
   }, []);
 
-  async function selectAgent(agent: Agent) {
-    setActiveAgentId(agent.id);
+  async function selectItem(item: SidebarItem) {
+    setActiveId(item.id);
 
-    if (!chats[agent.id]) {
+    if (!chats[item.id]) {
       try {
-        const chat = await createChat(agent.name);
+        // Create dashboard chat linked to the item's folder (existing or new)
+        const chat = await createChat(item.name, item.folder);
         const messages = await getChatMessages(chat.jid);
         wsRef.current?.send(JSON.stringify({ type: 'subscribe', chatJid: chat.jid }));
         setChats(prev => ({
           ...prev,
-          [agent.id]: { agent, jid: chat.jid, messages },
+          [item.id]: { item: { ...item, jid: chat.jid }, jid: chat.jid, messages },
         }));
       } catch {
-        const jid = `dashboard:${agent.name.toLowerCase()}-${Date.now()}`;
+        const jid = `dashboard:${item.name.toLowerCase()}-${Date.now()}`;
         setChats(prev => ({
           ...prev,
-          [agent.id]: { agent, jid, messages: [] },
+          [item.id]: { item, jid, messages: [] },
         }));
       }
     }
@@ -125,9 +141,9 @@ export function Dashboard() {
 
   function sendMessage() {
     const text = input.trim();
-    if (!text || !activeAgentId) return;
+    if (!text || !activeId) return;
 
-    const chat = chats[activeAgentId];
+    const chat = chats[activeId];
     if (!chat) return;
 
     const userMsg: ChatMessage = {
@@ -142,7 +158,7 @@ export function Dashboard() {
 
     setChats(prev => ({
       ...prev,
-      [activeAgentId!]: {
+      [activeId!]: {
         ...chat,
         messages: [...chat.messages, userMsg],
       },
@@ -169,9 +185,9 @@ export function Dashboard() {
     }
   }
 
-  const activeChat = activeAgentId ? chats[activeAgentId] : null;
-  const activeAgent = agents.find(a => a.id === activeAgentId);
-  const model = activeAgent?.model || defaultModel || '';
+  const activeChat = activeId ? chats[activeId] : null;
+  const activeItem = sidebarItems.find(i => i.id === activeId);
+  const model = defaultModel || '';
 
   return (
     <div className="dashboard">
@@ -197,19 +213,19 @@ export function Dashboard() {
         <div className="sidebar-section-label">Agents</div>
 
         <div className="sidebar-agents">
-          {agents.map((agent, i) => (
+          {sidebarItems.map((item, i) => (
             <motion.button
-              key={agent.id}
-              className={`agent-item ${activeAgentId === agent.id ? 'active' : ''}`}
-              onClick={() => selectAgent(agent)}
+              key={item.id}
+              className={`agent-item ${activeId === item.id ? 'active' : ''}`}
+              onClick={() => selectItem(item)}
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 0.05 + i * 0.03, duration: 0.3 }}
             >
               <div className="agent-item-avatar">
-                {agent.name.charAt(0).toUpperCase()}
+                {item.name.charAt(0).toUpperCase()}
               </div>
-              <span className="agent-item-name">{agent.name}</span>
+              <span className="agent-item-name">{item.name}</span>
             </motion.button>
           ))}
         </div>
@@ -219,7 +235,7 @@ export function Dashboard() {
           onClick={() => setShowCreateModal(true)}
         >
           <span style={{ fontSize: '1.1rem' }}>+</span>
-          <span>New Agent</span>
+          <span>New Chat</span>
         </button>
       </motion.div>
 
@@ -238,7 +254,7 @@ export function Dashboard() {
 
       {/* Chat Area */}
       <div className="chat-area">
-        {activeAgent ? (
+        {activeItem ? (
           <>
             <motion.div
               className="chat-header"
@@ -246,8 +262,8 @@ export function Dashboard() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.3 }}
             >
-              <span className="chat-header-name">{activeAgent.name}</span>
-              <span className="chat-header-status">{activeAgent.model}</span>
+              <span className="chat-header-name">{activeItem.name}</span>
+              <span className="chat-header-status">{model}</span>
             </motion.div>
 
             <div className="chat-messages">
@@ -265,7 +281,7 @@ export function Dashboard() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 0.2 }}
                   >
-                    Send a message to {activeAgent.name} below.
+                    Send a message to {activeItem.name} below.
                   </motion.p>
                 </div>
               )}
@@ -411,7 +427,7 @@ export function Dashboard() {
                 <textarea
                   ref={textareaRef}
                   rows={1}
-                  placeholder={`Message ${activeAgent.name}...`}
+                  placeholder={`Message ${activeItem.name}...`}
                   value={input}
                   onChange={e => { setInput(e.target.value); handleTextareaInput(); }}
                   onKeyDown={handleKeyDown}
@@ -435,16 +451,16 @@ export function Dashboard() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3, duration: 0.5 }}
             >
-              {agents.length === 0 ? 'Create your first agent' : 'Select an agent'}
+              {sidebarItems.length === 0 ? 'No chats yet' : 'Select a chat'}
             </motion.h2>
             <motion.p
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.4, duration: 0.5 }}
             >
-              {agents.length === 0
-                ? 'Click + New Agent in the sidebar to get started.'
-                : 'Choose an agent from the sidebar to start chatting.'}
+              {sidebarItems.length === 0
+                ? 'Click + New Chat in the sidebar to get started.'
+                : 'Choose a chat from the sidebar to start.'}
             </motion.p>
           </div>
         )}
@@ -457,10 +473,15 @@ export function Dashboard() {
             defaultModel={defaultModel}
             onClose={() => setShowCreateModal(false)}
             onCreate={async (name) => {
-              const agent = await createAgent({ name, model: defaultModel });
-              setAgents(prev => [...prev, agent]);
+              const newItem: SidebarItem = {
+                id: `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`,
+                name,
+                folder: `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`,
+                source: 'dashboard',
+              };
+              setSidebarItems(prev => [...prev, newItem]);
               setShowCreateModal(false);
-              selectAgent(agent);
+              selectItem(newItem);
             }}
           />
         )}
