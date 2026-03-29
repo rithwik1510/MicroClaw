@@ -7,6 +7,7 @@ import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ChannelMessageRef,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -28,16 +29,16 @@ async function sendTelegramMessage(
   chatId: string | number,
   text: string,
   options: { message_thread_id?: number } = {},
-): Promise<void> {
+): Promise<{ message_id?: number } | null> {
   try {
-    await api.sendMessage(chatId, text, {
+    return await api.sendMessage(chatId, text, {
       ...options,
       parse_mode: 'Markdown',
     });
   } catch (err) {
     // Fallback: send as plain text if Markdown parsing fails
     logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+    return await api.sendMessage(chatId, text, options);
   }
 }
 
@@ -237,31 +238,41 @@ export class TelegramChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+  ): Promise<ChannelMessageRef | null> {
     if (!this.bot) {
       logger.warn('Telegram bot not initialized');
-      return;
+      return null;
     }
 
     try {
       const numericId = jid.replace(/^tg:/, '');
+      let firstMessageId: string | null = null;
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
-        await sendTelegramMessage(this.bot.api, numericId, text);
+        const sent = await sendTelegramMessage(this.bot.api, numericId, text);
+        if (sent?.message_id != null) firstMessageId = String(sent.message_id);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await sendTelegramMessage(
+          const sent = await sendTelegramMessage(
             this.bot.api,
             numericId,
             text.slice(i, i + MAX_LENGTH),
           );
+          if (!firstMessageId && sent?.message_id != null) {
+            firstMessageId = String(sent.message_id);
+          }
         }
       }
       logger.info({ jid, length: text.length }, 'Telegram message sent');
+      return firstMessageId ? { id: firstMessageId, jid } : null;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
+      return null;
     }
   }
 

@@ -14,10 +14,12 @@ import {
   CONTEXT_MAX_DAILY_EXCERPTS,
   CONTEXT_MAX_DAILY_EXCERPT_CHARS,
   CONTEXT_MAX_IDENTITY_CHARS,
+  CONTEXT_MAX_MOPUS_CHARS,
   CONTEXT_MAX_MEMORY_CHARS,
   CONTEXT_MAX_RETRIEVED_MEMORY_CHARS,
   CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
   CONTEXT_MAX_SOUL_CHARS,
+  CONTEXT_MAX_STYLE_CHARS,
   CONTEXT_MAX_TOOLS_CHARS,
   CONTEXT_MAX_USER_CHARS,
   CONTEXT_RESERVED_TOOL_CHARS,
@@ -72,6 +74,23 @@ const PLACEHOLDER_MATCHERS: Partial<Record<ContextSourceKind, string[]>> = {
       '- Favor clarity, practical help, and continuity over filler.',
       '- Protect the user from risky or destructive actions by surfacing tradeoffs plainly.',
       '- Keep the tone warm and collaborative without becoming overly formal.',
+    ].join('\n'),
+  ],
+  mopus: [
+    [
+      '# Mopus',
+      '',
+      '- Define the assistant operating pattern here.',
+      '- Keep it durable, specific, and non-generic.',
+    ].join('\n'),
+  ],
+  style: [
+    [
+      '# Style',
+      '',
+      '- Write like a thoughtful operator: clear, confident, warm, and grounded.',
+      '- Prefer concise, high-signal answers over generic assistant filler.',
+      '- Sound human and steady; do not overperform enthusiasm.',
     ].join('\n'),
   ],
   user: [
@@ -178,10 +197,15 @@ function applyTrimMode(
 }
 
 function currentPromptMessage(prompt: string): string {
-  const marker = '[Current message - respond to this]';
-  const index = prompt.lastIndexOf(marker);
-  if (index === -1) return prompt.trim();
-  return prompt.slice(index + marker.length).trim();
+  const markers = [
+    '[Current message - this is the only request you should answer now]',
+    '[Current message - respond to this]',
+  ];
+  for (const marker of markers) {
+    const index = prompt.lastIndexOf(marker);
+    if (index !== -1) return prompt.slice(index + marker.length).trim();
+  }
+  return prompt.trim();
 }
 
 function decodeXmlEntities(input: string): string {
@@ -297,7 +321,9 @@ function readFileIfPresent(filePath: string): string {
 function isStaticLayerKind(kind: ContextSourceKind): boolean {
   return (
     kind === 'soul' ||
+    kind === 'mopus' ||
     kind === 'identity' ||
+    kind === 'style' ||
     kind === 'user' ||
     kind === 'tools'
   );
@@ -325,11 +351,27 @@ function buildCandidateFiles(groupFolder: string): CandidateFile[] {
       trimMode: 'tail',
     },
     {
+      kind: 'mopus',
+      scope: 'global',
+      label: 'MOPUS',
+      filePath: path.join(globalDir, 'MOPUS.md'),
+      maxChars: CONTEXT_MAX_MOPUS_CHARS,
+      trimMode: 'tail',
+    },
+    {
       kind: 'identity',
       scope: 'global',
       label: 'IDENTITY',
       filePath: path.join(globalDir, 'IDENTITY.md'),
       maxChars: CONTEXT_MAX_IDENTITY_CHARS,
+      trimMode: 'tail',
+    },
+    {
+      kind: 'style',
+      scope: 'global',
+      label: 'STYLE',
+      filePath: path.join(globalDir, 'STYLE.md'),
+      maxChars: CONTEXT_MAX_STYLE_CHARS,
       trimMode: 'tail',
     },
     {
@@ -389,6 +431,10 @@ function kindHeading(kind: ContextSourceKind, label: string): string {
       return `## ${label}\nThese are the assistant's non-negotiable voice and behavior rules.`;
     case 'identity':
       return `## ${label}\nThis defines who the assistant is and how it should position itself.`;
+    case 'mopus':
+      return `## ${label}\nThis defines the assistant's operating pattern for continuity, action, and judgment.`;
+    case 'style':
+      return `## ${label}\nThis defines how the assistant should sound in normal replies.`;
     case 'user':
       return `## ${label}\nThese are durable user preferences and profile notes.`;
     case 'tools':
@@ -756,11 +802,17 @@ function suppressLegacyLayersIfModernContextPresent(
   const modernLayers = layers.filter(
     (layer) =>
       layer.included &&
-      ['soul', 'identity', 'user', 'tools', 'memory'].includes(layer.kind),
+      ['soul', 'identity', 'style', 'user', 'tools', 'memory'].includes(
+        layer.kind,
+      ),
   );
   const hasStrongModernContext =
     modernLayers.some(
-      (layer) => layer.kind === 'soul' || layer.kind === 'identity',
+      (layer) =>
+        layer.kind === 'soul' ||
+        layer.kind === 'mopus' ||
+        layer.kind === 'identity' ||
+        layer.kind === 'style',
     ) && modernLayers.length >= 2;
 
   if (!hasStrongModernContext) return;
@@ -900,7 +952,9 @@ function shrinkLayersToBudget(
     'memory',
     'tools',
     'user',
+    'style',
     'identity',
+    'mopus',
   ];
 
   while (totalChars() > maxChars) {
@@ -955,7 +1009,9 @@ function enforceFinalPromptHardCap(
     'memory',
     'tools',
     'user',
+    'style',
     'identity',
+    'mopus',
     'soul',
   ];
 

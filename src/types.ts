@@ -140,7 +140,13 @@ export interface RetryPolicy {
   timeoutMs: number;
 }
 
-export type RuntimeToolFamily = 'web' | 'memory' | 'docs' | 'browser' | 'meta';
+export type RuntimeToolFamily =
+  | 'web'
+  | 'memory'
+  | 'docs'
+  | 'browser'
+  | 'host_files'
+  | 'meta';
 
 export interface PlannerCriticConfig {
   enabled: boolean;
@@ -148,6 +154,7 @@ export interface PlannerCriticConfig {
 }
 export type CapabilityRoute =
   | 'plain_response'
+  | 'host_file_operation'
   | 'web_lookup'
   | 'browser_operation'
   | 'deny_or_escalate';
@@ -495,6 +502,21 @@ export interface Channel {
 export interface ChannelMessageRef {
   id: string;
   jid: string;
+}
+
+export interface Agent {
+  id: string;
+  name: string;
+  model: string;
+  provider: RuntimeProvider;
+  personality: string | null;
+  tools: string; // JSON array of tool family names
+  created_at: string;
+}
+
+export interface SetupEntry {
+  key: string;
+  value: string;
 }
 
 // Callback type that channels use to deliver inbound messages

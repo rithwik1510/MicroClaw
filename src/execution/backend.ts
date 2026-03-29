@@ -1,5 +1,6 @@
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -10,6 +11,8 @@ import {
 } from '../container-runner.js';
 import {
   CONTAINER_MAX_OUTPUT_SIZE,
+  DATA_DIR,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
   OPENAI_WARM_SESSIONS,
   OPENAI_SESSION_IDLE_TIMEOUT_MS,
@@ -142,15 +145,90 @@ function normalizeInputForNative(input: ContainerInput): ContainerInput {
   };
 }
 
+const HOST_DIRS_CONFIG_PATH = path.join(
+  os.homedir(),
+  '.config',
+  'microclaw',
+  'host-directories.json',
+);
+
+function loadHostDirectoriesForEnv(): string | undefined {
+  try {
+    if (fs.existsSync(HOST_DIRS_CONFIG_PATH)) {
+      const raw = fs.readFileSync(HOST_DIRS_CONFIG_PATH, 'utf8');
+      // Validate it parses as JSON with a directories array
+      const parsed = JSON.parse(raw) as { directories?: unknown };
+      if (Array.isArray(parsed.directories)) {
+        return raw;
+      }
+    }
+  } catch {
+    // ignore read/parse errors
+  }
+  return undefined;
+}
+
+function ensureNativeSessionLayout(group: RegisteredGroup): {
+  sessionHomeDir: string;
+  claudeDir: string;
+} {
+  const sessionHomeDir = path.join(DATA_DIR, 'sessions', group.folder);
+  const claudeDir = path.join(sessionHomeDir, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+
+  const settingsFile = path.join(claudeDir, 'settings.json');
+  if (!fs.existsSync(settingsFile)) {
+    fs.writeFileSync(
+      settingsFile,
+      JSON.stringify(
+        {
+          env: {
+            CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+            CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+            CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+  }
+
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  const skillsDst = path.join(claudeDir, 'skills');
+  fs.mkdirSync(skillsDst, { recursive: true });
+  if (
+    fs.existsSync(skillsSrc) &&
+    typeof fs.readdirSync === 'function' &&
+    typeof fs.statSync === 'function' &&
+    typeof fs.cpSync === 'function'
+  ) {
+    for (const skillDir of fs.readdirSync(skillsSrc)) {
+      const srcDir = path.join(skillsSrc, skillDir);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      fs.cpSync(srcDir, path.join(skillsDst, skillDir), {
+        recursive: true,
+        force: true,
+      });
+    }
+  }
+
+  return { sessionHomeDir, claudeDir };
+}
+
 function buildNativeRunnerEnv(group: RegisteredGroup): Record<string, string> {
   const ipcDir = resolveGroupIpcPath(group.folder);
   const inputDir = path.join(ipcDir, 'input');
   fs.mkdirSync(inputDir, { recursive: true });
   const groupWorkspaceDir = resolveGroupFolderPath(group.folder);
-  return {
+  const globalWorkspaceDir = path.join(GROUPS_DIR, 'global');
+  const { sessionHomeDir } = ensureNativeSessionLayout(group);
+  const env: Record<string, string> = {
     ...process.env,
     NANOCLAW_IPC_INPUT_DIR: inputDir,
     NANOCLAW_GROUP_WORKSPACE_DIR: groupWorkspaceDir,
+    NANOCLAW_GLOBAL_WORKSPACE_DIR: globalWorkspaceDir,
+    NANOCLAW_SESSION_HOME_DIR: sessionHomeDir,
     NANOCLAW_GROUP_FOLDER: group.folder,
     NANOCLAW_TIMEZONE: TIMEZONE,
     NANOCLAW_AGENT_IPC_POLL_MS:
@@ -158,6 +236,13 @@ function buildNativeRunnerEnv(group: RegisteredGroup): Record<string, string> {
       backendEnv.NANOCLAW_AGENT_IPC_POLL_MS ||
       '200',
   } as Record<string, string>;
+
+  const hostDirs = loadHostDirectoriesForEnv();
+  if (hostDirs) {
+    env.NANOCLAW_HOST_DIRECTORIES = hostDirs;
+  }
+
+  return env;
 }
 
 async function runNativeAgent(

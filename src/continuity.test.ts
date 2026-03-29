@@ -118,6 +118,64 @@ describe('buildContinuityPlan', () => {
     expect(plan.summaryToUse).toContain('Keep continuity strong');
     expect(plan.diagnostics.usedStoredSummary).toBe(true);
   });
+
+  it('keeps enough recent user prompts for referential follow-ups even with a small turn limit', () => {
+    const conversationMessages = [
+      msg({ id: 'u1', content: 'First question' }),
+      msg({
+        id: 'a1',
+        sender: 'Andy',
+        sender_name: 'Andy',
+        content: 'First answer',
+        is_bot_message: true,
+      }),
+      msg({ id: 'u2', content: 'Second question' }),
+      msg({
+        id: 'a2',
+        sender: 'Andy',
+        sender_name: 'Andy',
+        content: 'Second answer',
+        is_bot_message: true,
+      }),
+      msg({ id: 'u3', content: 'Third question' }),
+      msg({
+        id: 'a3',
+        sender: 'Andy',
+        sender_name: 'Andy',
+        content: 'Third answer',
+        is_bot_message: true,
+      }),
+      msg({ id: 'u4', content: 'Can you give me the answer again?' }),
+    ];
+
+    const plan = buildContinuityPlan({
+      assistantName: 'Andy',
+      conversationMessages,
+      currentMessages: [conversationMessages[conversationMessages.length - 1]],
+      recentTurnLimit: 2,
+      recentCharBudget: 200,
+      summaryMinMessages: 20,
+    });
+
+    const recentUserContents = plan.recentContextMessages
+      .filter(
+        (message) => !message.is_bot_message && message.sender_name !== 'Andy',
+      )
+      .map((message) => message.content);
+
+    expect(recentUserContents).toEqual(
+      expect.arrayContaining([
+        'First question',
+        'Second question',
+        'Third question',
+      ]),
+    );
+    expect(
+      plan.recentContextMessages.some(
+        (message) => message.content === 'Third answer',
+      ),
+    ).toBe(true);
+  });
 });
 
 describe('buildContinuityPrompt', () => {
@@ -142,9 +200,14 @@ describe('buildContinuityPrompt', () => {
 
     expect(prompt).toContain('[Previous conversation summary]');
     expect(prompt).toContain(
-      '[Recent conversation since the summarized portion - for context]',
+      '[Recent conversation background - context only, not the active request unless referenced below]',
     );
-    expect(prompt).toContain('[Current message - respond to this]');
+    expect(prompt).toContain(
+      '[Current message - this is the only request you should answer now]',
+    );
+    expect(prompt).toContain(
+      'Answer only the latest request in the current message section',
+    );
     expect(prompt).toContain('role="assistant"');
     expect(prompt).toContain('Now make continuity feel much better.');
   });

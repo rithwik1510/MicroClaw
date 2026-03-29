@@ -6,6 +6,7 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  Agent,
   AuthProfile,
   BrowserActionAuditEntry,
   GroupRuntimePolicy,
@@ -283,6 +284,21 @@ function createSchema(database: Database.Database): void {
       owner TEXT NOT NULL,
       expires_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS agents (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      model TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'openai_compatible',
+      personality TEXT,
+      tools TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS setup (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -460,6 +476,26 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* trigger already exists */
   }
+
+  // Dashboard source tracking
+  const msgCols = database.pragma('table_info(messages)') as Array<{
+    name: string;
+  }>;
+  if (!msgCols.some((c) => c.name === 'source')) {
+    database.exec(
+      `ALTER TABLE messages ADD COLUMN source TEXT DEFAULT 'legacy'`,
+    );
+  }
+  if (!msgCols.some((c) => c.name === 'thread_id')) {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
+  }
+
+  const chatCols = database.pragma('table_info(chats)') as Array<{
+    name: string;
+  }>;
+  if (!chatCols.some((c) => c.name === 'source')) {
+    database.exec(`ALTER TABLE chats ADD COLUMN source TEXT DEFAULT 'legacy'`);
+  }
 }
 
 export function initDatabase(): void {
@@ -560,6 +596,11 @@ export function initDatabase(): void {
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+}
+
+/** Returns the active database instance. For use in tests only. */
+export function _getTestDb(): Database.Database {
+  return db;
 }
 
 /**
@@ -2530,4 +2571,74 @@ export function clearNonExplicitMemoryEntries(groupFolder: string): void {
   db.prepare(
     `DELETE FROM memory_entries WHERE group_folder = ? AND source != 'explicit'`,
   ).run(groupFolder);
+}
+
+// --- Agents ---
+
+export function createAgent(agent: Agent): void {
+  db.prepare(
+    `INSERT INTO agents (id, name, model, provider, personality, tools, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    agent.id,
+    agent.name,
+    agent.model,
+    agent.provider,
+    agent.personality,
+    agent.tools,
+    agent.created_at,
+  );
+}
+
+export function getAgent(id: string): Agent | undefined {
+  return db.prepare('SELECT * FROM agents WHERE id = ?').get(id) as
+    | Agent
+    | undefined;
+}
+
+export function getAllAgents(): Agent[] {
+  return db
+    .prepare('SELECT * FROM agents ORDER BY created_at DESC')
+    .all() as Agent[];
+}
+
+export function updateAgent(
+  id: string,
+  updates: Partial<
+    Pick<Agent, 'name' | 'model' | 'provider' | 'personality' | 'tools'>
+  >,
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  for (const [key, value] of Object.entries(updates)) {
+    if (value !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(value);
+    }
+  }
+  if (fields.length === 0) return;
+  values.push(id);
+  db.prepare(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`).run(
+    ...values,
+  );
+}
+
+export function deleteAgent(id: string): void {
+  db.prepare('DELETE FROM agents WHERE id = ?').run(id);
+}
+
+// --- Setup ---
+
+export function getSetupValue(key: string): string | undefined {
+  const row = db.prepare('SELECT value FROM setup WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
+  return row?.value;
+}
+
+export function setSetupValue(key: string, value: string): void {
+  db.prepare('INSERT OR REPLACE INTO setup (key, value) VALUES (?, ?)').run(
+    key,
+    value,
+  );
 }
