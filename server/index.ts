@@ -4,6 +4,8 @@ import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import type { AppCore } from '../src/core.js';
 import { healthRouter } from './api/health.js';
+import { agentsRouter } from './api/agents.js';
+import { chatsRouter } from './api/chats.js';
 import { errorHandler } from './middleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,6 +16,8 @@ export function createApp(core: AppCore): { app: express.Express; httpServer: Re
 
   // API routes
   app.use('/api', healthRouter(core));
+  app.use('/api', agentsRouter());
+  app.use('/api', chatsRouter(core));
 
   // Serve static UI (pre-built React app)
   const uiDistPath = path.resolve(__dirname, '../ui/dist');
