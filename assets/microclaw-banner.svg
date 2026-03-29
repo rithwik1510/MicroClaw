@@ -1,31 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 320" fill="none">
   <defs>
     <linearGradient id="bgGrad" x1="0" y1="0" x2="900" y2="320" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0a0e1a"/>
-      <stop offset="50%" stop-color="#111827"/>
-      <stop offset="100%" stop-color="#0a0e1a"/>
+      <stop offset="0%" stop-color="#0a0a0a"/>
+      <stop offset="50%" stop-color="#111111"/>
+      <stop offset="100%" stop-color="#0a0a0a"/>
     </linearGradient>
-    <linearGradient id="clawGrad" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#06b6d4"/>
-      <stop offset="50%" stop-color="#8b5cf6"/>
-      <stop offset="100%" stop-color="#ec4899"/>
+    <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#E8613A"/>
+      <stop offset="100%" stop-color="#F5A07A"/>
     </linearGradient>
     <linearGradient id="textGrad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#e0f2fe"/>
+      <stop offset="0%" stop-color="#f5f5f5"/>
       <stop offset="100%" stop-color="#ffffff"/>
     </linearGradient>
-    <linearGradient id="accentGrad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0%" stop-color="#06b6d4"/>
-      <stop offset="100%" stop-color="#8b5cf6"/>
-    </linearGradient>
-    <linearGradient id="orbGlow1" cx="0.5" cy="0.5" r="0.5" fx="0.5" fy="0.5">
-      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.15"/>
-      <stop offset="100%" stop-color="#06b6d4" stop-opacity="0"/>
-    </linearGradient>
-    <linearGradient id="orbGlow2" cx="0.5" cy="0.5" r="0.5" fx="0.5" fy="0.5">
-      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.12"/>
-      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0"/>
-    </linearGradient>
+    <radialGradient id="orbGlow1" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#E8613A" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#E8613A" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orbGlow2" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#F5A07A" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#F5A07A" stop-opacity="0"/>
+    </radialGradient>
     <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
       <feGaussianBlur stdDeviation="3" result="blur"/>
       <feMerge>
@@ -34,91 +29,98 @@
       </feMerge>
     </filter>
     <filter id="softGlow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="8"/>
+      <feGaussianBlur stdDeviation="12"/>
     </filter>
   </defs>
 
   <!-- Background -->
   <rect width="900" height="320" rx="16" fill="url(#bgGrad)"/>
 
-  <!-- Subtle grid pattern -->
-  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5" opacity="0.4"/>
+  <!-- Subtle grid -->
+  <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+    <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#1a1a1a" stroke-width="0.5" opacity="0.5"/>
   </pattern>
   <rect width="900" height="320" rx="16" fill="url(#grid)"/>
 
   <!-- Ambient glow orbs -->
-  <circle cx="150" cy="160" r="180" fill="url(#orbGlow1)"/>
-  <circle cx="750" cy="160" r="200" fill="url(#orbGlow2)"/>
+  <circle cx="200" cy="160" r="220" fill="url(#orbGlow1)"/>
+  <circle cx="700" cy="160" r="180" fill="url(#orbGlow2)"/>
 
-  <!-- Decorative circuit lines -->
-  <g stroke="#1e293b" stroke-width="1" opacity="0.6">
-    <line x1="0" y1="80" x2="120" y2="80"/>
-    <line x1="120" y1="80" x2="140" y2="100"/>
-    <circle cx="140" cy="100" r="2" fill="#06b6d4" opacity="0.6"/>
+  <!-- Decorative accent lines -->
+  <g stroke="#222222" stroke-width="1" opacity="0.7">
+    <line x1="0" y1="80" x2="100" y2="80"/>
+    <line x1="100" y1="80" x2="118" y2="98"/>
+    <circle cx="118" cy="98" r="2.5" fill="#E8613A" opacity="0.6"/>
 
-    <line x1="900" y1="240" x2="780" y2="240"/>
-    <line x1="780" y1="240" x2="760" y2="220"/>
-    <circle cx="760" cy="220" r="2" fill="#8b5cf6" opacity="0.6"/>
+    <line x1="900" y1="240" x2="810" y2="240"/>
+    <line x1="810" y1="240" x2="792" y2="222"/>
+    <circle cx="792" cy="222" r="2.5" fill="#F5A07A" opacity="0.5"/>
 
-    <line x1="0" y1="260" x2="80" y2="260"/>
-    <line x1="80" y1="260" x2="95" y2="245"/>
-    <circle cx="95" cy="245" r="2" fill="#ec4899" opacity="0.4"/>
+    <line x1="0" y1="260" x2="70" y2="260"/>
+    <line x1="70" y1="260" x2="84" y2="246"/>
+    <circle cx="84" cy="246" r="2" fill="#E8613A" opacity="0.35"/>
 
-    <line x1="900" y1="60" x2="830" y2="60"/>
-    <line x1="830" y1="60" x2="815" y2="75"/>
-    <circle cx="815" cy="75" r="2" fill="#06b6d4" opacity="0.4"/>
+    <line x1="900" y1="60" x2="840" y2="60"/>
+    <line x1="840" y1="60" x2="826" y2="74"/>
+    <circle cx="826" cy="74" r="2" fill="#F5A07A" opacity="0.35"/>
   </g>
 
   <!-- Claw Icon -->
-  <g transform="translate(170, 90)" filter="url(#glow)">
+  <g transform="translate(170, 88)" filter="url(#glow)">
     <!-- Three claw marks -->
-    <path d="M 0 0 Q 15 50 5 110" stroke="url(#clawGrad)" stroke-width="5" stroke-linecap="round" fill="none"/>
-    <path d="M 25 -10 Q 35 45 30 120" stroke="url(#clawGrad)" stroke-width="6" stroke-linecap="round" fill="none"/>
-    <path d="M 50 0 Q 55 50 55 110" stroke="url(#clawGrad)" stroke-width="5" stroke-linecap="round" fill="none"/>
+    <path d="M 0 0 Q 15 50 5 115" stroke="url(#accentGrad)" stroke-width="5" stroke-linecap="round" fill="none"/>
+    <path d="M 25 -10 Q 35 48 30 125" stroke="url(#accentGrad)" stroke-width="6.5" stroke-linecap="round" fill="none"/>
+    <path d="M 50 0 Q 55 50 55 115" stroke="url(#accentGrad)" stroke-width="5" stroke-linecap="round" fill="none"/>
 
-    <!-- Claw tips (tapered) -->
-    <circle cx="5" cy="110" r="3" fill="#ec4899" opacity="0.9"/>
-    <circle cx="30" cy="120" r="3.5" fill="#8b5cf6" opacity="0.9"/>
-    <circle cx="55" cy="110" r="3" fill="#06b6d4" opacity="0.9"/>
+    <!-- Claw tips -->
+    <circle cx="5" cy="115" r="3" fill="#F5A07A" opacity="0.9"/>
+    <circle cx="30" cy="125" r="3.5" fill="#E8613A" opacity="0.95"/>
+    <circle cx="55" cy="115" r="3" fill="#F5A07A" opacity="0.9"/>
 
-    <!-- Micro dot cluster at top -->
-    <circle cx="12" cy="-15" r="1.5" fill="#06b6d4" opacity="0.7"/>
-    <circle cx="25" cy="-20" r="2" fill="#8b5cf6" opacity="0.8"/>
-    <circle cx="38" cy="-15" r="1.5" fill="#ec4899" opacity="0.7"/>
+    <!-- Micro dots at top -->
+    <circle cx="12" cy="-15" r="1.5" fill="#E8613A" opacity="0.6"/>
+    <circle cx="25" cy="-20" r="2" fill="#F5A07A" opacity="0.7"/>
+    <circle cx="38" cy="-15" r="1.5" fill="#E8613A" opacity="0.6"/>
   </g>
 
-  <!-- MicroClaw text -->
-  <text x="280" y="155" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-weight="800" font-size="72" fill="url(#textGrad)" letter-spacing="-2">
-    Micro<tspan fill="url(#accentGrad)">Claw</tspan>
+  <!-- MicroClaw text — serif style -->
+  <text x="280" y="148" font-family="Georgia, 'Times New Roman', serif" font-weight="400" font-size="68" fill="url(#textGrad)" letter-spacing="-1">
+    Micro<tspan fill="url(#accentGrad)" font-weight="600">Claw</tspan>
   </text>
 
   <!-- Tagline -->
-  <text x="284" y="195" font-family="'Segoe UI', system-ui, -apple-system, sans-serif" font-weight="400" font-size="16" fill="#94a3b8" letter-spacing="4">
-    AGENTIC AI RUNTIME FOR THE REAL WORLD
+  <text x="284" y="188" font-family="'Segoe UI', system-ui, sans-serif" font-weight="400" font-size="15" fill="#666666" letter-spacing="3.5">
+    YOUR AI AGENT THAT ACTUALLY DOES THINGS
   </text>
 
   <!-- Accent line under tagline -->
-  <rect x="284" y="210" width="120" height="2" rx="1" fill="url(#accentGrad)" opacity="0.6"/>
+  <rect x="284" y="202" width="80" height="2" rx="1" fill="url(#accentGrad)" opacity="0.5"/>
 
-  <!-- Version pill -->
-  <g transform="translate(284, 230)">
-    <rect width="80" height="24" rx="12" fill="#1e293b" stroke="#334155" stroke-width="0.5"/>
-    <text x="40" y="16" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#06b6d4">v1.2.25</text>
+  <!-- Pills row -->
+  <g transform="translate(284, 222)">
+    <!-- npx pill -->
+    <rect width="110" height="26" rx="13" fill="#1a1a1a" stroke="#222222" stroke-width="0.5"/>
+    <text x="55" y="17" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#E8613A">npx microclaw</text>
   </g>
 
-  <!-- BYOK pill -->
-  <g transform="translate(374, 230)">
-    <rect width="55" height="24" rx="12" fill="#1e293b" stroke="#334155" stroke-width="0.5"/>
-    <text x="27.5" y="16" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#8b5cf6">BYOK</text>
+  <g transform="translate(404, 222)">
+    <!-- 33+ tools pill -->
+    <rect width="78" height="26" rx="13" fill="#1a1a1a" stroke="#222222" stroke-width="0.5"/>
+    <text x="39" y="17" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#F5A07A">33+ tools</text>
   </g>
 
-  <!-- MIT pill -->
-  <g transform="translate(439, 230)">
-    <rect width="45" height="24" rx="12" fill="#1e293b" stroke="#334155" stroke-width="0.5"/>
-    <text x="22.5" y="16" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#ec4899">MIT</text>
+  <g transform="translate(492, 222)">
+    <!-- BYOK pill -->
+    <rect width="55" height="26" rx="13" fill="#1a1a1a" stroke="#222222" stroke-width="0.5"/>
+    <text x="27.5" y="17" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#a0a0a0">BYOK</text>
   </g>
 
-  <!-- Bottom border accent -->
-  <rect x="0" y="316" width="900" height="4" rx="0" fill="url(#accentGrad)" opacity="0.4"/>
+  <g transform="translate(557, 222)">
+    <!-- MIT pill -->
+    <rect width="45" height="26" rx="13" fill="#1a1a1a" stroke="#222222" stroke-width="0.5"/>
+    <text x="22.5" y="17" text-anchor="middle" font-family="'SF Mono', 'Cascadia Code', monospace" font-size="11" fill="#a0a0a0">MIT</text>
+  </g>
+
+  <!-- Bottom accent line -->
+  <rect x="0" y="316" width="900" height="4" rx="0" fill="url(#accentGrad)" opacity="0.35"/>
 </svg>

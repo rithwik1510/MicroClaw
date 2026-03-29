@@ -8,10 +8,10 @@
 </p>
 
 <p align="center">
-  <a href="#-quick-start"><img src="https://img.shields.io/badge/get_started-5s_setup-06b6d4?style=for-the-badge" alt="Get Started"></a>&nbsp;
-  <a href="#-tool-families"><img src="https://img.shields.io/badge/tools-33+-8b5cf6?style=for-the-badge" alt="33+ Tools"></a>&nbsp;
-  <a href="#-bring-your-own-model"><img src="https://img.shields.io/badge/BYOK-any_model-ec4899?style=for-the-badge" alt="BYOK"></a>&nbsp;
-  <a href="https://github.com/rithwik1510/MicroClaw/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-10b981?style=for-the-badge" alt="MIT License"></a>
+  <a href="#-quick-start"><img src="https://img.shields.io/badge/get_started-npx_microclaw-E8613A?style=for-the-badge" alt="Get Started"></a>&nbsp;
+  <a href="#-tool-families"><img src="https://img.shields.io/badge/tools-33+-F5A07A?style=for-the-badge" alt="33+ Tools"></a>&nbsp;
+  <a href="#-bring-your-own-model"><img src="https://img.shields.io/badge/BYOK-any_model-E8613A?style=for-the-badge" alt="BYOK"></a>&nbsp;
+  <a href="https://github.com/rithwik1510/MicroClaw/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-666666?style=for-the-badge" alt="MIT License"></a>
 </p>
 
 ---
