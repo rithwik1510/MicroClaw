@@ -93,7 +93,7 @@ export function Dashboard() {
   // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chats, activeItemId, isThinking]);
+  }, [chats, activeId, isThinking]);
 
   // Close attach menu when clicking outside
   useEffect(() => {
