@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import { getExistingGroups, createChat, getChatMessages, getSetup } from './api';
 import type { ExistingGroup, ChatMessage } from './api';
+import { PersonaPage } from './PersonaPage';
 
 interface SidebarItem {
   id: string;       // unique key for sidebar
@@ -37,6 +38,7 @@ export function Dashboard() {
   const [isThinking, setIsThinking] = useState(false);
   const [defaultModel, setDefaultModel] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeView, setActiveView] = useState<'chat' | 'persona'>('chat');
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -131,6 +133,7 @@ export function Dashboard() {
   }, []);
 
   async function selectItem(item: SidebarItem) {
+    setActiveView('chat');
     setActiveId(item.id);
 
     if (!chats[item.id]) {
@@ -251,6 +254,17 @@ export function Dashboard() {
           <span style={{ fontSize: '1.1rem' }}>+</span>
           <span>New Chat</span>
         </button>
+
+        <div className="sidebar-divider" style={{ width: '100%', margin: '4px 16px' }} />
+
+        <button
+          className={`agent-item ${activeView === 'persona' ? 'active' : ''}`}
+          onClick={() => { setActiveView('persona'); setActiveId(null); }}
+          style={{ margin: '0 8px', width: 'calc(100% - 16px)' }}
+        >
+          <div className="agent-item-avatar" style={{ fontSize: '0.75rem' }}>P</div>
+          <span className="agent-item-name">Persona</span>
+        </button>
       </motion.div>
 
       {/* Floating toggle when sidebar is closed */}
@@ -268,7 +282,9 @@ export function Dashboard() {
 
       {/* Chat Area */}
       <div className="chat-area">
-        {activeItem ? (
+        {activeView === 'persona' ? (
+          <PersonaPage />
+        ) : activeItem ? (
           <>
             <motion.div
               className="chat-header"

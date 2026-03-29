@@ -120,3 +120,23 @@ export async function getChatMessages(jid: string, limit = 50): Promise<ChatMess
   const res = await fetch(`${BASE}/chats/${encodeURIComponent(jid)}/messages?limit=${limit}`);
   return res.json();
 }
+
+export interface PersonaFile {
+  filename: string;
+  description: string;
+  content: string;
+}
+
+export async function getPersonaFiles(): Promise<PersonaFile[]> {
+  const res = await fetch(`${BASE}/persona`);
+  return res.json();
+}
+
+export async function savePersonaFile(filename: string, content: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/persona/${encodeURIComponent(filename)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  return res.json();
+}

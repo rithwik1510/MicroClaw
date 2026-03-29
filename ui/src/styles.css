@@ -926,6 +926,160 @@ body {
 
 /* ─── Utility ────────────────────────────────── */
 
+/* ─── Persona Page ───────────────────────── */
+
+.persona-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 36px;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.persona-header {
+  margin-bottom: 20px;
+}
+
+.persona-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 1.5rem;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.persona-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.persona-chip {
+  padding: 7px 16px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-transform: uppercase;
+}
+
+.persona-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+
+.persona-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-glow-subtle);
+  box-shadow: 0 0 14px var(--accent-glow);
+}
+
+.persona-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.persona-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  gap: 12px;
+}
+
+.persona-editor-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.persona-editor-name {
+  font-family: var(--font-display);
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.persona-editor-desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.persona-unsaved-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  flex-shrink: 0;
+}
+
+.persona-save-btn {
+  padding: 7px 20px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.persona-save-btn:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 0 16px var(--accent-glow);
+}
+
+.persona-save-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.persona-textarea {
+  flex: 1;
+  min-height: 400px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'SFMono-Regular', 'Consolas', 'Liberation Mono', monospace;
+  font-size: 0.85rem;
+  line-height: 1.65;
+  padding: 16px 20px;
+  resize: none;
+  outline: none;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  tab-size: 2;
+}
+
+.persona-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 20px var(--accent-glow-subtle);
+}
+
+.persona-editor-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 4px 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
 .fade-in {
   animation: fadeIn 0.5s ease forwards;
 }
