@@ -1,6 +1,9 @@
 import { AppCore, _setSingletonCore } from './core.js';
 import './channels/index.js';
 import { logger } from './logger.js';
+import { startServer } from '../server/index.js';
+import detectPort from 'detect-port';
+import open from 'open';
 
 // Re-export for backwards compatibility
 export { escapeXml, formatMessages } from './router.js';
@@ -37,6 +40,19 @@ async function main(): Promise<void> {
   // Start subsystems
   core.startSubsystems();
 
+  // Start Express dashboard
+  const defaultPort = parseInt(process.env.MICROCLAW_PORT || '3100', 10);
+  const port = await detectPort(defaultPort);
+  await startServer(core, port);
+
+  const url = `http://localhost:${port}`;
+  logger.info(`Dashboard: ${url}`);
+
+  // Auto-open browser (skip if NO_OPEN env is set — useful for dev/CI)
+  if (!process.env.NO_OPEN) {
+    await open(url);
+  }
+
   // Start polling loop (only useful if messaging channels exist)
   if (connected.length > 0) {
     core.startMessageLoop().catch((err) => {
@@ -45,7 +61,7 @@ async function main(): Promise<void> {
     });
   }
 
-  logger.info('MicroClaw running');
+  logger.info(`MicroClaw running — dashboard at ${url}`);
 }
 
 // Guard: only run when executed directly, not when imported by tests
