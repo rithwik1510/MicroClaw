@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { getPersonaFiles, savePersonaFile } from './api';
 import type { PersonaFile } from './api';
 
@@ -106,16 +106,8 @@ export function PersonaPage() {
       </div>
 
       {/* Editor */}
-      <AnimatePresence mode="wait">
-        {activeFile && (
-          <motion.div
-            key={activeFile}
-            className="persona-editor"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-          >
+      {activeFile && (
+          <div className="persona-editor">
             <div className="persona-editor-header">
               <div className="persona-editor-title-row">
                 <span className="persona-editor-name">{displayName}</span>
@@ -144,9 +136,8 @@ export function PersonaPage() {
               <span>Ctrl+S to save</span>
               <span>{editorContent.length.toLocaleString()} chars</span>
             </div>
-          </motion.div>
+          </div>
         )}
-      </AnimatePresence>
     </div>
   );
 }
