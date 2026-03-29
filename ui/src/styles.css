@@ -629,19 +629,32 @@ body {
 .message.agent .message-bubble h3 { font-size: 1.0em; }
 .message.agent .message-bubble table {
   border-collapse: collapse;
-  margin: 8px 0;
-  font-size: 0.9em;
+  margin: 12px 0;
+  font-size: 0.88em;
   width: 100%;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 .message.agent .message-bubble th,
 .message.agent .message-bubble td {
   border: 1px solid var(--border);
-  padding: 6px 10px;
+  padding: 10px 14px;
   text-align: left;
+  line-height: 1.5;
 }
 .message.agent .message-bubble th {
   background: var(--bg-tertiary);
   font-weight: 600;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+}
+.message.agent .message-bubble td {
+  background: var(--bg-secondary);
+}
+.message.agent .message-bubble tr:nth-child(even) td {
+  background: var(--bg-tertiary);
 }
 .message.agent .message-bubble a {
   color: var(--accent);
