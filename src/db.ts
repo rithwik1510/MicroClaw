@@ -1217,6 +1217,12 @@ export function getConversationSummary(
   };
 }
 
+export function clearConversationSummary(groupFolder: string): void {
+  db.prepare('DELETE FROM conversation_summaries WHERE group_folder = ?').run(
+    groupFolder,
+  );
+}
+
 export function setConversationSummary(input: {
   groupFolder: string;
   summary: string;
