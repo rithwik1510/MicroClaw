@@ -929,8 +929,10 @@ function joinLayers(layers: ContextLayer[]): string {
     .filter((layer) => layer.included && layer.content.trim())
     .map((layer) => layer.content.trim());
   if (included.length === 0) return '';
-  const header =
-    'You are a persistent personal assistant. Use project context below as guidance. Prioritize the current request. Do not fabricate facts.';
+  const hasSoul = layers.some((l) => l.kind === 'soul' && l.included);
+  const header = hasSoul
+    ? 'The following project context files define who you are and how you operate. If SOUL.md is present, fully embody its persona and tone — avoid stiff, generic, or robotic replies. Prioritize the current request. Do not fabricate facts.'
+    : 'You are a persistent personal assistant. Use project context below as guidance. Prioritize the current request. Do not fabricate facts.';
   return [header, ...included].join('\n\n');
 }
 
