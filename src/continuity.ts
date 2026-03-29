@@ -16,6 +16,7 @@ const LOW_SIGNAL_ASSISTANT_REPLY_PATTERNS = [
 ];
 const DEFAULT_RECENT_TURN_LIMIT = 8;
 const DEFAULT_RECENT_CHAR_BUDGET = 6000;
+const DEFAULT_MIN_RECENT_USER_MESSAGES = 3;
 const DEFAULT_SUMMARY_MIN_MESSAGES = 8;
 const DEFAULT_SUMMARY_MIN_CHARS = 3000;
 const DEFAULT_SUMMARY_MAX_CHARS = 2200;
@@ -290,17 +291,33 @@ function selectRecentMessages(
   messages: NewMessage[],
   maxTurns: number,
   maxChars: number,
+  assistantName: string,
+  minUserMessages: number = DEFAULT_MIN_RECENT_USER_MESSAGES,
 ): NewMessage[] {
   const selected: NewMessage[] = [];
   let totalChars = 0;
+  let selectedUserMessages = 0;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     const nextChars = totalChars + normalizeLine(message.content).length;
-    if (selected.length >= maxTurns) break;
-    if (selected.length > 0 && nextChars > maxChars) break;
+    const isAssistant =
+      message.is_bot_message === true || message.sender_name === assistantName;
+    const wouldSatisfyUserFloor =
+      selectedUserMessages >= minUserMessages ||
+      (!isAssistant && selectedUserMessages + 1 >= minUserMessages);
+    if (
+      selected.length >= maxTurns &&
+      selectedUserMessages >= minUserMessages
+    ) {
+      break;
+    }
+    if (selected.length > 0 && nextChars > maxChars && wouldSatisfyUserFloor) {
+      break;
+    }
     selected.unshift(message);
     totalChars = nextChars;
+    if (!isAssistant) selectedUserMessages += 1;
   }
 
   return selected;
@@ -372,6 +389,7 @@ export function buildContinuityPlan(input: {
     eligibleRecent,
     input.recentTurnLimit || DEFAULT_RECENT_TURN_LIMIT,
     input.recentCharBudget || DEFAULT_RECENT_CHAR_BUDGET,
+    input.assistantName,
   );
   const recentStartIndex = eligibleRecent.length - recentContextMessages.length;
   const olderMessages =
@@ -462,7 +480,7 @@ export function buildContinuityPrompt(input: {
   );
   const safeSummary = sanitizeSummary(input.summary);
   const parts = [
-    `You are ${input.assistantName}, continuing an ongoing conversation. Keep continuity with the prior exchange, your earlier replies, and the user's current intent.`,
+    `You are ${input.assistantName}, continuing an ongoing conversation. Use earlier conversation only as background context. Answer only the latest request in the current message section unless the user explicitly asks you to repeat, continue, revisit, or compare with an earlier request. Do not merge older unfinished topics into this reply unless the latest message clearly asks for that.`,
   ];
 
   if (safeSummary && safeSummary.trim()) {
@@ -471,7 +489,7 @@ export function buildContinuityPrompt(input: {
 
   if (relevantRecentContextMessages.length > 0) {
     parts.push(
-      '[Recent conversation since the summarized portion - for context]',
+      '[Recent conversation background - context only, not the active request unless referenced below]',
       formatConversationHistory(
         relevantRecentContextMessages,
         input.assistantName,
@@ -480,7 +498,7 @@ export function buildContinuityPrompt(input: {
   }
 
   parts.push(
-    '[Current message - respond to this]',
+    '[Current message - this is the only request you should answer now]',
     formatMessages(boundedCurrentMessages),
   );
 

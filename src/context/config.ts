@@ -41,7 +41,9 @@ export const CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS = parsePositiveInt(
 
 // Memory and identity layers — generous caps so nothing important is dropped
 export const CONTEXT_MAX_SOUL_CHARS = 4_000;
+export const CONTEXT_MAX_MOPUS_CHARS = 3_000;
 export const CONTEXT_MAX_IDENTITY_CHARS = 4_000;
+export const CONTEXT_MAX_STYLE_CHARS = 2_500;
 export const CONTEXT_MAX_USER_CHARS = 6_000;
 export const CONTEXT_MAX_TOOLS_CHARS = 6_000;
 export const CONTEXT_MAX_MEMORY_CHARS = 6_000;

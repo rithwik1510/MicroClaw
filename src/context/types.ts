@@ -2,7 +2,9 @@ export type ContextScope = 'global' | 'group' | 'legacy';
 
 export type ContextSourceKind =
   | 'soul'
+  | 'mopus'
   | 'identity'
+  | 'style'
   | 'user'
   | 'tools'
   | 'memory'
