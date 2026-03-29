@@ -308,6 +308,9 @@ export function Dashboard() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                   >
+                    {!(msg.is_from_me || msg.sender === 'user') && (
+                      <div className="message-sender">{activeItem.name}</div>
+                    )}
                     <div className="message-bubble">{msg.content}</div>
                   </motion.div>
                 ))}
