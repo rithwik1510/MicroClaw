@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import Markdown from 'react-markdown';
 import { getExistingGroups, createChat, getChatMessages, getSetup } from './api';
 import type { ExistingGroup, ChatMessage } from './api';
 
@@ -311,7 +312,12 @@ export function Dashboard() {
                     {!(msg.is_from_me || msg.sender === 'user') && (
                       <div className="message-sender">{activeItem.name}</div>
                     )}
-                    <div className="message-bubble">{msg.content}</div>
+                    <div className="message-bubble">
+                      {(msg.is_from_me || msg.sender === 'user')
+                        ? msg.content
+                        : <Markdown>{msg.content}</Markdown>
+                      }
+                    </div>
                   </motion.div>
                 ))}
               </AnimatePresence>
