@@ -290,6 +290,37 @@ describe('buildContinuityPrompt', () => {
   });
 });
 
+describe('tool output truncation', () => {
+  it('truncates excessively long bot messages in recent context', () => {
+    const dirListing = 'Host directories accessible:\n\n' +
+      Array.from({ length: 50 }, (_, i) => `  file-${i}.txt (${i * 100}B)`).join('\n');
+
+    const plan = buildContinuityPlan({
+      assistantName: 'Andy',
+      conversationMessages: [
+        msg({ id: 'u1', content: 'list my desktop files', timestamp: '2026-03-29T10:00:00Z' }),
+        msg({
+          id: 'b1',
+          content: dirListing,
+          sender_name: 'Andy',
+          is_bot_message: true,
+          timestamp: '2026-03-29T10:00:01Z',
+        }),
+        msg({ id: 'u2', content: 'hey', timestamp: '2026-03-29T10:01:00Z' }),
+      ],
+      currentMessages: [
+        msg({ id: 'c1', content: 'whats up', timestamp: '2026-03-29T10:02:00Z' }),
+      ],
+      recentTurnLimit: 12,
+    });
+
+    const recentBotMsg = plan.recentContextMessages.find(m => m.is_bot_message);
+    if (recentBotMsg) {
+      expect(recentBotMsg.content.length).toBeLessThan(500);
+    }
+  });
+});
+
 describe('isSyntheticAssistantReply', () => {
   it('recognizes stored fallback replies', () => {
     expect(
