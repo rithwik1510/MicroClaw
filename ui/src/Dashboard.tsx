@@ -318,16 +318,16 @@ export function Dashboard() {
                 {activeChat?.messages.map((msg) => (
                   <motion.div
                     key={msg.id}
-                    className={`message ${msg.is_from_me || msg.sender === 'user' ? 'user' : 'agent'}`}
+                    className={`message ${!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi') ? 'user' : 'agent'}`}
                     initial={{ opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    {!(msg.is_from_me || msg.sender === 'user') && (
+                    {!(!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi')) && (
                       <div className="message-sender">{activeItem.name}</div>
                     )}
                     <div className="message-bubble">
-                      {(msg.is_from_me || msg.sender === 'user')
+                      {(!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi'))
                         ? msg.content
                         : <Markdown>{msg.content}</Markdown>
                       }
