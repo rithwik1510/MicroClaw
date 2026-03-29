@@ -247,15 +247,6 @@ export function Dashboard() {
           ))}
         </div>
 
-        <button
-          className="sidebar-add-btn"
-          onClick={() => setShowCreateModal(true)}
-        >
-          <span style={{ fontSize: '1.1rem' }}>+</span>
-          <span>New Chat</span>
-        </button>
-
-        {/* Bottom bar — persistent like Discord */}
         <div className="sidebar-bottom">
           <button
             className={`sidebar-bottom-btn ${activeView === 'persona' ? 'active' : ''}`}
@@ -263,6 +254,13 @@ export function Dashboard() {
           >
             <span className="sidebar-bottom-icon">&#9830;</span>
             <span>Persona</span>
+          </button>
+          <button
+            className="sidebar-bottom-btn"
+            onClick={() => setShowCreateModal(true)}
+          >
+            <span className="sidebar-bottom-icon">+</span>
+            <span>New Chat</span>
           </button>
         </div>
       </motion.div>

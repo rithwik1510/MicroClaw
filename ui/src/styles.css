@@ -462,9 +462,12 @@ body {
 /* Sidebar bottom bar */
 .sidebar-bottom {
   margin-top: auto;
-  padding: 12px 8px;
+  padding: 10px 8px 14px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .sidebar-bottom-btn {
