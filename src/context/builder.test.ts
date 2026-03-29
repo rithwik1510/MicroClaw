@@ -77,6 +77,51 @@ describe('buildContextBundle', () => {
     ).toBe('selective_context');
   });
 
+  it('loads a dedicated style layer when present', async () => {
+    fs.writeFileSync(
+      path.join(groupsDir, 'global', 'SOUL.md'),
+      '# Soul\n- Stay grounded.\n',
+    );
+    fs.writeFileSync(
+      path.join(groupsDir, 'global', 'STYLE.md'),
+      '# Style\n- Sound sharp and natural.\n- Avoid canned assistant filler.\n',
+    );
+
+    const { buildContextBundle } = await import('./builder.js');
+    const bundle = buildContextBundle({
+      groupFolder: 'discord_dm',
+      prompt: '[Current message - respond to this]\nWhat should we do next?',
+      today: new Date('2026-03-07T10:30:00.000Z'),
+    });
+
+    expect(bundle.systemPrompt).toContain('## STYLE');
+    expect(bundle.systemPrompt).toContain('Avoid canned assistant filler');
+  });
+
+  it('loads a dedicated mopus layer when present', async () => {
+    fs.writeFileSync(
+      path.join(groupsDir, 'global', 'SOUL.md'),
+      '# Soul\n- Stay grounded.\n',
+    );
+    fs.writeFileSync(
+      path.join(groupsDir, 'global', 'MOPUS.md'),
+      '# Mopus\n- Preserve continuity and act with judgment.\n',
+    );
+
+    const { buildContextBundle } = await import('./builder.js');
+    const bundle = buildContextBundle({
+      groupFolder: 'discord_dm',
+      prompt:
+        '[Current message - respond to this]\nHelp me continue this task.',
+      today: new Date('2026-03-07T10:30:00.000Z'),
+    });
+
+    expect(bundle.systemPrompt).toContain('## MOPUS');
+    expect(bundle.systemPrompt).toContain(
+      'Preserve continuity and act with judgment',
+    );
+  });
+
   it('skips daily notes when no strong keywords are present', async () => {
     fs.writeFileSync(
       path.join(groupsDir, 'discord_dm', 'memory', '2026-03-07.md'),

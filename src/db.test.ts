@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  _getTestDb,
   acquireAuthRefreshLock,
   getPinnedMemoryEntries,
   insertMemoryEntry,
@@ -41,6 +42,13 @@ import {
   storeMessage,
   storeMessageDirect,
   updateTask,
+  createAgent,
+  getAgent,
+  getAllAgents,
+  updateAgent,
+  deleteAgent,
+  getSetupValue,
+  setSetupValue,
 } from './db.js';
 
 beforeEach(() => {
@@ -1071,5 +1079,77 @@ describe('getPinnedMemoryEntries', () => {
       pinned: true,
     });
     expect(getPinnedMemoryEntries('group_b')).toHaveLength(0);
+  });
+});
+
+describe('schema migrations', () => {
+  it('messages table has source column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(messages)') as Array<{ name: string }>;
+    expect(info.some((col) => col.name === 'source')).toBe(true);
+  });
+
+  it('chats table has source column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(chats)') as Array<{ name: string }>;
+    expect(info.some((col) => col.name === 'source')).toBe(true);
+  });
+
+  it('messages table has thread_id column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(messages)') as Array<{ name: string }>;
+    expect(info.some((col) => col.name === 'thread_id')).toBe(true);
+  });
+});
+
+describe('agents table', () => {
+  function seedAgent() {
+    createAgent({
+      id: 'agent-1',
+      name: 'TestBot',
+      model: 'qwen2.5:14b',
+      provider: 'openai_compatible',
+      personality: 'Helpful assistant',
+      tools: '["web","memory"]',
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  it('create and get agent', () => {
+    seedAgent();
+    const agent = getAgent('agent-1');
+    expect(agent).toBeDefined();
+    expect(agent!.name).toBe('TestBot');
+    expect(agent!.model).toBe('qwen2.5:14b');
+  });
+
+  it('list all agents', () => {
+    seedAgent();
+    const agents = getAllAgents();
+    expect(agents.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('update agent', () => {
+    seedAgent();
+    updateAgent('agent-1', { name: 'UpdatedBot', model: 'llama3.3:70b' });
+    const agent = getAgent('agent-1');
+    expect(agent!.name).toBe('UpdatedBot');
+  });
+
+  it('delete agent', () => {
+    seedAgent();
+    deleteAgent('agent-1');
+    expect(getAgent('agent-1')).toBeUndefined();
+  });
+});
+
+describe('setup table', () => {
+  it('set and get setup value', () => {
+    setSetupValue('onboarding_completed', 'true');
+    expect(getSetupValue('onboarding_completed')).toBe('true');
+  });
+
+  it('returns undefined for missing key', () => {
+    expect(getSetupValue('nonexistent')).toBeUndefined();
   });
 });
