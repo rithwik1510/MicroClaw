@@ -14,16 +14,30 @@ export function chatsRouter(core: AppCore): Router {
     res.json(chats);
   });
 
-  // List existing registered groups — so the dashboard can show them in the sidebar
+  // List groups for the dashboard sidebar — deduplicated by folder
   router.get('/chats/groups', (_req, res) => {
     const groups = core.getRegisteredGroups();
-    const list = Object.entries(groups).map(([jid, group]) => ({
-      jid,
-      name: group.name,
-      folder: group.folder,
-      isMain: group.isMain || false,
-      requiresTrigger: group.requiresTrigger ?? true,
-    }));
+    const seen = new Set<string>();
+    const list: Array<{ jid: string; name: string; folder: string; isMain: boolean }> = [];
+
+    for (const [jid, group] of Object.entries(groups)) {
+      // Skip if we already have this folder (prefer non-dashboard JIDs)
+      if (seen.has(group.folder)) continue;
+      seen.add(group.folder);
+
+      // Skip empty/orphan dashboard groups with no real data
+      if (jid.startsWith('dashboard:') && !Object.values(groups).some(
+        g => !g.folder.startsWith('dashboard_') || g.folder === group.folder,
+      )) continue;
+
+      list.push({
+        jid,
+        name: group.name,
+        folder: group.folder,
+        isMain: group.isMain || false,
+      });
+    }
+
     res.json(list);
   });
 
@@ -34,7 +48,6 @@ export function chatsRouter(core: AppCore): Router {
       return;
     }
 
-    // If linking to an existing group folder (e.g., discord_dm), use that folder
     const folder = existingFolder || `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`;
 
     // Reuse existing dashboard JID for this folder
