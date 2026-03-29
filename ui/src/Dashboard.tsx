@@ -255,16 +255,16 @@ export function Dashboard() {
           <span>New Chat</span>
         </button>
 
-        <div className="sidebar-divider" style={{ width: '100%', margin: '4px 16px' }} />
-
-        <button
-          className={`agent-item ${activeView === 'persona' ? 'active' : ''}`}
-          onClick={() => { setActiveView('persona'); setActiveId(null); }}
-          style={{ margin: '0 8px', width: 'calc(100% - 16px)' }}
-        >
-          <div className="agent-item-avatar" style={{ fontSize: '0.75rem' }}>P</div>
-          <span className="agent-item-name">Persona</span>
-        </button>
+        {/* Bottom bar — persistent like Discord */}
+        <div className="sidebar-bottom">
+          <button
+            className={`sidebar-bottom-btn ${activeView === 'persona' ? 'active' : ''}`}
+            onClick={() => { setActiveView('persona'); setActiveId(null); }}
+          >
+            <span className="sidebar-bottom-icon">&#9830;</span>
+            <span>Persona</span>
+          </button>
+        </div>
       </motion.div>
 
       {/* Floating toggle when sidebar is closed */}
