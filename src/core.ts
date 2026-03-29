@@ -158,8 +158,10 @@ export class AppCore {
 
   // --- Public API ---
 
-  async start(): Promise<void> {
-    this.acquireProcessLock();
+  async start(opts?: { skipProcessLock?: boolean }): Promise<void> {
+    if (!opts?.skipProcessLock) {
+      this.acquireProcessLock();
+    }
     this.ensureContainerSystemRunning();
     initDatabase();
     migrateToLocalOnlyIfNeeded();
@@ -223,7 +225,7 @@ export class AppCore {
     this.stopAllTypingHeartbeats();
     await this.queue.shutdown(10000);
     for (const ch of this.channels) await ch.disconnect();
-    this.releaseProcessLock();
+    if (this.hasProcessLock) this.releaseProcessLock();
     this.running = false;
   }
 
