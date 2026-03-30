@@ -2637,7 +2637,8 @@ export function getSetupValue(key: string): string | undefined {
 }
 
 export function setSetupValue(key: string, value: string): void {
-  db.prepare(
-    'INSERT OR REPLACE INTO setup (key, value) VALUES (?, ?)',
-  ).run(key, value);
+  db.prepare('INSERT OR REPLACE INTO setup (key, value) VALUES (?, ?)').run(
+    key,
+    value,
+  );
 }

@@ -1,4 +1,5 @@
 import { Channel, NewMessage } from './types.js';
+import { TIMEZONE } from './config.js';
 import { formatLocalTime } from './timezone.js';
 
 export function escapeXml(s: string): string {
@@ -12,7 +13,7 @@ export function escapeXml(s: string): string {
 
 export function formatMessages(
   messages: NewMessage[],
-  timezone: string,
+  timezone: string = TIMEZONE,
 ): string {
   const lines = messages.map((m) => {
     const displayTime = formatLocalTime(m.timestamp, timezone);

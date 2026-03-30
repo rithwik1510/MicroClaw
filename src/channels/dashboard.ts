@@ -20,7 +20,10 @@ export class DashboardChannel implements Channel {
     // Dashboard is always connected — it's local
   }
 
-  async sendMessage(jid: string, text: string): Promise<ChannelMessageRef | null> {
+  async sendMessage(
+    jid: string,
+    text: string,
+  ): Promise<ChannelMessageRef | null> {
     if (this.sendFn) {
       this.sendFn(jid, text);
       return { id: `dash-out-${Date.now()}`, jid };

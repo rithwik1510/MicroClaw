@@ -10,8 +10,13 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { scanAllDirectories, formatDirectoryReport } from './host-dirs.js';
 
-const IPC_DIR = '/workspace/ipc';
+// In native mode NANOCLAW_IPC_INPUT_DIR points to <ipcDir>/input.
+// Derive the parent ipcDir so messages/ and tasks/ subdirs are correct.
+const IPC_DIR = process.env.NANOCLAW_IPC_INPUT_DIR
+  ? path.dirname(process.env.NANOCLAW_IPC_INPUT_DIR)
+  : '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
 
@@ -330,6 +335,36 @@ Use available_groups.json to find the JID for a group. The folder name must be c
     return {
       content: [{ type: 'text' as const, text: `Group "${args.name}" registered. It will start receiving messages immediately.` }],
     };
+  },
+);
+
+server.tool(
+  'list_host_directories',
+  'List all host computer directories accessible to the agent — their real paths, read/write status, and a summary of contents. Call this first before performing any file operations on the user\'s computer.',
+  {},
+  async () => {
+    try {
+      const dirs = scanAllDirectories();
+      if (dirs.length === 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: 'No host directories are configured. Ask the user to run `/add-host-files` to set up access to their computer files.',
+          }],
+        };
+      }
+      return {
+        content: [{ type: 'text' as const, text: formatDirectoryReport(dirs) }],
+      };
+    } catch (err) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Error scanning host directories: ${err instanceof Error ? err.message : String(err)}`,
+        }],
+        isError: true,
+      };
+    }
   },
 );
 

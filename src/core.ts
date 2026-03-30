@@ -343,7 +343,10 @@ export class AppCore {
       onMessage: (chatJid: string, msg: NewMessage) => {
         // Remote control commands - intercept before storage
         const trimmed = msg.content.trim();
-        if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
+        if (
+          trimmed === '/remote-control' ||
+          trimmed === '/remote-control-end'
+        ) {
           handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
             logger.error({ err, chatJid }, 'Remote control command error'),
           );
@@ -419,12 +422,7 @@ export class AppCore {
       getSessions: () => this.sessions,
       queue: this.queue,
       onProcess: (groupJid, proc, containerName, groupFolder) =>
-        this.queue.registerProcess(
-          groupJid,
-          proc,
-          containerName,
-          groupFolder,
-        ),
+        this.queue.registerProcess(groupJid, proc, containerName, groupFolder),
       sendMessage: async (jid, rawText) => {
         const channel = findChannel(this.channels, jid);
         if (!channel) {
@@ -439,12 +437,7 @@ export class AppCore {
       registeredGroups: () => this.registeredGroups,
       queue: this.queue,
       onProcess: (groupJid, proc, containerName, groupFolder) =>
-        this.queue.registerProcess(
-          groupJid,
-          proc,
-          containerName,
-          groupFolder,
-        ),
+        this.queue.registerProcess(groupJid, proc, containerName, groupFolder),
       sendMessage: async (jid, rawText) => {
         const channel = findChannel(this.channels, jid);
         if (!channel) {
@@ -620,10 +613,7 @@ export class AppCore {
 
   // --- Private methods ---
 
-  private async pulseTyping(
-    channel: Channel,
-    chatJid: string,
-  ): Promise<void> {
+  private async pulseTyping(channel: Channel, chatJid: string): Promise<void> {
     try {
       await channel.setTyping?.(chatJid, true);
     } catch (err) {
@@ -914,11 +904,7 @@ export class AppCore {
   private recoverPendingMessages(): void {
     for (const [chatJid, group] of Object.entries(this.registeredGroups)) {
       const sinceTimestamp = this.lastAgentTimestamp[chatJid] || '';
-      const pending = getMessagesSince(
-        chatJid,
-        sinceTimestamp,
-        ASSISTANT_NAME,
-      );
+      const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
       if (pending.length > 0) {
         logger.info(
           { group: group.name, pendingCount: pending.length },
@@ -1223,7 +1209,11 @@ export class AppCore {
           resetIdleTimer();
         }
 
-        if (result.status === 'success' && !result.isPartial && !result.result) {
+        if (
+          result.status === 'success' &&
+          !result.isPartial &&
+          !result.result
+        ) {
           this.queue.notifyIdle(chatJid);
         }
 

@@ -49,11 +49,14 @@ describe('DashboardChannel', () => {
     });
 
     channel.handleIncomingMessage('dashboard:test', 'hello world');
-    expect(onMessage).toHaveBeenCalledWith('dashboard:test', expect.objectContaining({
-      chat_jid: 'dashboard:test',
-      content: 'hello world',
-      sender: 'user',
-    }));
+    expect(onMessage).toHaveBeenCalledWith(
+      'dashboard:test',
+      expect.objectContaining({
+        chat_jid: 'dashboard:test',
+        content: 'hello world',
+        sender: 'user',
+      }),
+    );
   });
 
   it('disconnect clears sendFn', async () => {
