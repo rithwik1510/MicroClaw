@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { getAgents, createAgent, createChat, getChatMessages } from './api';
+import { getAgents, createAgent, createChat, getChatMessages, getSetup } from './api';
 import type { Agent, ChatMessage } from './api';
 
 interface AgentChat {
@@ -16,13 +16,17 @@ export function Dashboard() {
   const [input, setInput] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  const [defaultModel, setDefaultModel] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Load agents on mount
+  // Load agents and default model on mount
   useEffect(() => {
     getAgents().then(setAgents).catch(() => {});
+    getSetup().then(data => {
+      if (data.existing?.model) setDefaultModel(data.existing.model);
+    }).catch(() => {});
   }, []);
 
   // Connect WebSocket
@@ -315,9 +319,10 @@ export function Dashboard() {
       <AnimatePresence>
         {showCreateModal && (
           <CreateAgentModal
+            defaultModel={defaultModel}
             onClose={() => setShowCreateModal(false)}
-            onCreate={async (name, agentModel) => {
-              const agent = await createAgent({ name, model: agentModel });
+            onCreate={async (name) => {
+              const agent = await createAgent({ name, model: defaultModel });
               setAgents(prev => [...prev, agent]);
               setShowCreateModal(false);
               selectAgent(agent);
@@ -330,14 +335,15 @@ export function Dashboard() {
 }
 
 function CreateAgentModal({
+  defaultModel,
   onClose,
   onCreate,
 }: {
+  defaultModel: string;
   onClose: () => void;
-  onCreate: (name: string, model: string) => void;
+  onCreate: (name: string) => void;
 }) {
   const [name, setName] = useState('');
-  const [model, setModel] = useState('');
 
   return (
     <motion.div
@@ -366,23 +372,20 @@ function CreateAgentModal({
             value={name}
             onChange={e => setName(e.target.value)}
             autoFocus
+            onKeyDown={e => { if (e.key === 'Enter' && name.trim()) onCreate(name); }}
           />
         </div>
 
-        <div className="form-group">
-          <label>Model</label>
-          <input
-            type="text"
-            placeholder="e.g. qwen2.5:14b"
-            value={model}
-            onChange={e => setModel(e.target.value)}
-          />
-        </div>
+        {defaultModel && (
+          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 16 }}>
+            Using model: {defaultModel}
+          </div>
+        )}
 
         <button
           className="setup-btn"
-          onClick={() => onCreate(name, model)}
-          disabled={!name.trim() || !model.trim()}
+          onClick={() => onCreate(name)}
+          disabled={!name.trim()}
         >
           Create
         </button>
