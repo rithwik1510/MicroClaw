@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import type { AppCore } from '../src/core.js';
 import { healthRouter } from './api/health.js';
+import { setupRouter } from './api/setup.js';
 import { agentsRouter } from './api/agents.js';
 import { chatsRouter } from './api/chats.js';
 import { errorHandler } from './middleware.js';
@@ -23,6 +24,7 @@ export function createApp(core: AppCore): {
 
   // API routes
   app.use('/api', healthRouter(core));
+  app.use('/api', setupRouter());
   app.use('/api', agentsRouter());
   app.use('/api', chatsRouter(core));
 
@@ -31,7 +33,7 @@ export function createApp(core: AppCore): {
   app.use(express.static(uiDistPath));
 
   // SPA fallback — serve index.html for all non-API routes
-  app.get('*', (_req, res) => {
+  app.use((_req, res) => {
     const indexPath = path.join(uiDistPath, 'index.html');
     res.sendFile(indexPath, (err) => {
       if (err) {
