@@ -1,12 +1,14 @@
 import { Router } from 'express';
-import { getSetupValue, setSetupValue } from '../../src/db.js';
+import { getSetupValue, setSetupValue, getAllRuntimeProfiles } from '../../src/db.js';
 
 export function setupRouter(): Router {
   const router = Router();
 
   router.get('/setup', (_req, res) => {
-    const completed = getSetupValue('onboarding_completed') === 'true';
-    res.json({ completed });
+    // Setup is complete if either: explicit onboarding done, OR runtime profiles already exist
+    const explicitlyDone = getSetupValue('onboarding_completed') === 'true';
+    const hasProfiles = getAllRuntimeProfiles().some(p => p.enabled);
+    res.json({ completed: explicitlyDone || hasProfiles });
   });
 
   router.post('/setup', (req, res) => {
