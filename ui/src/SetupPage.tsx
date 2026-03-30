@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { postSetup, testConnection } from './api';
+import type { SetupData } from './api';
 
 interface Props {
+  existingConfig: SetupData['existing'];
   onComplete: () => void;
 }
 
@@ -12,12 +14,14 @@ const PROVIDERS = [
   { value: 'claude', label: 'Claude (Anthropic)' },
 ];
 
-export function SetupPage({ onComplete }: Props) {
-  const [step, setStep] = useState(0);
-  const [provider, setProvider] = useState('openai_compatible');
-  const [model, setModel] = useState('');
+export function SetupPage({ existingConfig, onComplete }: Props) {
+  // If existing config, start on the model tab (step 1) with fields pre-filled
+  const hasExisting = !!existingConfig;
+  const [step, setStep] = useState(hasExisting ? 1 : 0);
+  const [provider, setProvider] = useState(existingConfig?.provider || 'openai_compatible');
+  const [model, setModel] = useState(existingConfig?.model || '');
   const [apiKey, setApiKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
+  const [baseUrl, setBaseUrl] = useState(existingConfig?.baseUrl || '');
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -84,9 +88,11 @@ export function SetupPage({ onComplete }: Props) {
 
           {step === 1 && (
             <>
-              <h1>Connect Your Model</h1>
+              <h1>{hasExisting ? 'Your Model' : 'Connect Your Model'}</h1>
               <p className="subtitle">
-                Choose your AI provider and configure the connection.
+                {hasExisting
+                  ? 'Your existing configuration is shown below. Review and continue.'
+                  : 'Choose your AI provider and configure the connection.'}
               </p>
 
               <div className="form-group">
@@ -110,10 +116,10 @@ export function SetupPage({ onComplete }: Props) {
 
               {provider !== 'openai_compatible' && (
                 <div className="form-group">
-                  <label>API Key</label>
+                  <label>API Key {hasExisting && <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(already configured)</span>}</label>
                   <input
                     type="password"
-                    placeholder="sk-..."
+                    placeholder={hasExisting ? '••••••••••' : 'sk-...'}
                     value={apiKey}
                     onChange={e => setApiKey(e.target.value)}
                   />
@@ -139,9 +145,11 @@ export function SetupPage({ onComplete }: Props) {
               >
                 Continue
               </button>
-              <button className="setup-btn secondary" onClick={() => setStep(0)}>
-                Back
-              </button>
+              {!hasExisting && (
+                <button className="setup-btn secondary" onClick={() => setStep(0)}>
+                  Back
+                </button>
+              )}
             </>
           )}
 

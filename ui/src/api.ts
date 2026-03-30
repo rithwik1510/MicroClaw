@@ -33,7 +33,16 @@ export async function getHealth(): Promise<HealthData> {
   return res.json();
 }
 
-export async function getSetup(): Promise<{ completed: boolean }> {
+export interface SetupData {
+  completed: boolean;
+  existing: {
+    provider: string;
+    model: string;
+    baseUrl: string;
+  } | null;
+}
+
+export async function getSetup(): Promise<SetupData> {
   const res = await fetch(`${BASE}/setup`);
   return res.json();
 }

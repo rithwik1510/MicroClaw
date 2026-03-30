@@ -3,16 +3,21 @@ import { motion, AnimatePresence } from 'motion/react';
 import { SetupPage } from './SetupPage';
 import { Dashboard } from './Dashboard';
 import { getSetup } from './api';
+import type { SetupData } from './api';
 import './styles.css';
 
 type View = 'loading' | 'setup' | 'dashboard';
 
 export function App() {
   const [view, setView] = useState<View>('loading');
+  const [existingConfig, setExistingConfig] = useState<SetupData['existing']>(null);
 
   useEffect(() => {
     getSetup()
-      .then(data => setView(data.completed ? 'dashboard' : 'setup'))
+      .then(data => {
+        setExistingConfig(data.existing);
+        setView(data.completed ? 'dashboard' : 'setup');
+      })
       .catch(() => setView('setup'));
   }, []);
 
@@ -54,7 +59,10 @@ export function App() {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.4 }}
         >
-          <SetupPage onComplete={() => setView('dashboard')} />
+          <SetupPage
+            existingConfig={existingConfig}
+            onComplete={() => setView('dashboard')}
+          />
         </motion.div>
       )}
 
