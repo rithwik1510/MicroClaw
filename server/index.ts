@@ -7,10 +7,17 @@ import { healthRouter } from './api/health.js';
 import { agentsRouter } from './api/agents.js';
 import { chatsRouter } from './api/chats.js';
 import { errorHandler } from './middleware.js';
+import { DashboardChannel } from '../src/channels/dashboard.js';
+import { setupWebSocket } from './ws.js';
+import { storeMessage, storeChatMetadata } from '../src/db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export function createApp(core: AppCore): { app: express.Express; httpServer: ReturnType<typeof createServer> } {
+export function createApp(core: AppCore): {
+  app: express.Express;
+  httpServer: ReturnType<typeof createServer>;
+  dashboardChannel: DashboardChannel;
+} {
   const app = express();
   app.use(express.json());
 
@@ -35,8 +42,23 @@ export function createApp(core: AppCore): { app: express.Express; httpServer: Re
 
   app.use(errorHandler);
 
+  // Create dashboard channel and register it with the core
+  const dashboardChannel = new DashboardChannel({
+    onMessage: (_chatJid, msg) => {
+      storeMessage(msg);
+    },
+    onChatMetadata: (chatJid, timestamp, name, channel, isGroup) =>
+      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    registeredGroups: () => core.getRegisteredGroups(),
+  });
+  core.getChannels().push(dashboardChannel);
+
   const httpServer = createServer(app);
-  return { app, httpServer };
+
+  // Wire WebSocket handler for real-time dashboard chat
+  setupWebSocket(httpServer, core, dashboardChannel);
+
+  return { app, httpServer, dashboardChannel };
 }
 
 export async function startServer(core: AppCore, port: number): Promise<ReturnType<typeof createServer>> {
