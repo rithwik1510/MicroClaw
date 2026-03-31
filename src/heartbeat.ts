@@ -398,7 +398,9 @@ export async function runHeartbeat(
           .slice(0, 5)
           .join(','),
       });
-    } catch { /* lesson extraction is non-critical */ }
+    } catch {
+      /* lesson extraction is non-critical */
+    }
     logger.error({ group: group.folder, error: lastError }, 'Heartbeat failed');
     try {
       getActivityBroadcast()({
@@ -410,7 +412,9 @@ export async function runHeartbeat(
         summary: 'Silent check — all clear',
         durationMs,
       });
-    } catch { /* broadcast is best-effort */ }
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
 
@@ -438,7 +442,9 @@ export async function runHeartbeat(
         summary: 'Silent check — all clear',
         durationMs,
       });
-    } catch { /* broadcast is best-effort */ }
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
 
@@ -467,7 +473,9 @@ export async function runHeartbeat(
         summary: 'Silent check — all clear',
         durationMs,
       });
-    } catch { /* broadcast is best-effort */ }
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
 
@@ -491,7 +499,9 @@ export async function runHeartbeat(
       summary: sanitized,
       durationMs,
     });
-  } catch { /* broadcast is best-effort */ }
+  } catch {
+    /* broadcast is best-effort */
+  }
 }
 
 export function startHeartbeatLoop(deps: HeartbeatDependencies): void {

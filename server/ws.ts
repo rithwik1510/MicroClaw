@@ -5,6 +5,13 @@ import type { DashboardChannel } from '../src/channels/dashboard.js';
 import { storeMessageDirect, storeChatMetadata } from '../src/db.js';
 import { logger } from '../src/logger.js';
 
+type BroadcastFn = (event: any) => void;
+let activityBroadcast: BroadcastFn = () => {};
+
+export function getActivityBroadcast(): BroadcastFn {
+  return activityBroadcast;
+}
+
 interface WsMessage {
   type: 'message' | 'subscribe' | 'unsubscribe';
   chatJid?: string;
@@ -14,6 +21,15 @@ interface WsMessage {
 export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChannel: DashboardChannel): void {
   const wss = new WebSocketServer({ noServer: true });
   const subscriptions = new Map<WebSocket, Set<string>>();
+
+  activityBroadcast = (event: any) => {
+    const message = JSON.stringify({ type: 'activity', entry: event });
+    for (const [ws] of subscriptions) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+      }
+    }
+  };
 
   // Wire dashboard channel's send function to broadcast to subscribed WS clients
   dashboardChannel.setSendFn((jid: string, text: string) => {
