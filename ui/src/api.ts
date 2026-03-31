@@ -343,3 +343,38 @@ export async function toggleMemoryPin(id: number, pinned: boolean): Promise<{ ok
   });
   return res.json();
 }
+
+// ── Scheduled Tasks ────────────────────────────────────────────
+
+export interface ScheduledTask {
+  id: string;
+  group_folder: string;
+  chat_jid: string;
+  prompt: string;
+  schedule_type: 'cron' | 'interval' | 'once';
+  schedule_value: string;
+  status: 'active' | 'paused' | 'completed' | 'cancelled';
+  created_at: string;
+  last_run?: string;
+  last_result?: string;
+}
+
+export async function getTasks(group?: string): Promise<ScheduledTask[]> {
+  const qs = group ? `?group=${encodeURIComponent(group)}` : '';
+  const res = await fetch(`${BASE}/tasks${qs}`);
+  return res.json();
+}
+
+export async function updateTaskStatus(id: string, status: 'active' | 'paused' | 'cancelled'): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/tasks/${encodeURIComponent(id)}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+  return res.json();
+}
+
+export async function deleteTaskApi(id: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  return res.json();
+}

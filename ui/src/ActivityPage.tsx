@@ -3,9 +3,11 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   getHeartbeats, getHeartbeatDetail, saveHeartbeat, triggerHeartbeat, deleteHeartbeat,
   getActivity, getActivitySummary, getRoutines, automateRoutine, dismissRoutineApi,
+  getTasks, updateTaskStatus, deleteTaskApi,
 } from './api';
 import type {
   HeartbeatConfig, HeartbeatDetail, ActivityEntry, DailySummary, DetectedRoutine,
+  ScheduledTask,
 } from './api';
 
 /* ── Helpers ─────────────────────────────────────────── */
@@ -62,6 +64,7 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
   const [summary, setSummary] = useState<DailySummary | null>(null);
 
   const [routines, setRoutines] = useState<Record<string, DetectedRoutine[]>>({});
+  const [tasks, setTasks] = useState<ScheduledTask[]>([]);
 
   /* ── Fetch data on mount ──────────────────── */
 
@@ -69,6 +72,7 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
     getHeartbeats().then(setHeartbeats).catch(() => {});
     getActivity({ limit: 30 }).then(setActivity).catch(() => {});
     getActivitySummary().then(setSummary).catch(() => {});
+    getTasks().then(setTasks).catch(() => {});
   }, []);
 
   // Fetch routines for each group that has heartbeats
@@ -169,6 +173,24 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
       ...prev,
       [groupFolder]: prev[groupFolder]?.filter(r => r.keywords !== keywords) ?? [],
     }));
+  }, []);
+
+  /* ── Task handlers ────────────────────────── */
+
+  const handleToggleTask = useCallback(async (id: string, currentStatus: string) => {
+    const newStatus = currentStatus === 'active' ? 'paused' : 'active';
+    await updateTaskStatus(id, newStatus);
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status: newStatus } : t));
+  }, []);
+
+  const handleCancelTask = useCallback(async (id: string) => {
+    await updateTaskStatus(id, 'cancelled');
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'cancelled' } : t));
+  }, []);
+
+  const handleDeleteTask = useCallback(async (id: string) => {
+    await deleteTaskApi(id);
+    setTasks(prev => prev.filter(t => t.id !== id));
   }, []);
 
   /* ── Flatten routines for display ────────── */
@@ -329,6 +351,67 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
           </div>
         )}
       </section>
+
+      {/* ── Scheduled Tasks ──────────────────── */}
+      {tasks.length > 0 && (
+        <section>
+          <div className="activity-section-title">
+            <span>Scheduled Tasks</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
+            {tasks
+              .filter(t => t.status !== 'completed')
+              .map(t => (
+              <motion.div
+                key={t.id}
+                className="task-card"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <div className="task-card-left">
+                  <div className={`status-dot ${t.status === 'active' ? 'ok' : t.status === 'paused' ? 'acted' : 'error'}`} />
+                  <div className="task-info">
+                    <div className="task-prompt">{t.prompt}</div>
+                    <div className="task-meta">
+                      {t.schedule_type === 'cron' ? `cron: ${t.schedule_value}` :
+                       t.schedule_type === 'interval' ? `every ${formatInterval(parseInt(t.schedule_value))}` :
+                       `once: ${new Date(t.schedule_value).toLocaleDateString()}`}
+                      {' · '}{t.group_folder}
+                      {' · '}<span className={`task-status-label ${t.status}`}>{t.status}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="task-actions">
+                  {t.status !== 'cancelled' && (
+                    <button
+                      className="btn-small secondary"
+                      onClick={() => handleToggleTask(t.id, t.status)}
+                    >
+                      {t.status === 'active' ? 'Pause' : 'Resume'}
+                    </button>
+                  )}
+                  {t.status !== 'cancelled' && (
+                    <button
+                      className="btn-small danger"
+                      onClick={() => handleCancelTask(t.id)}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  {t.status === 'cancelled' && (
+                    <button
+                      className="btn-small danger"
+                      onClick={() => handleDeleteTask(t.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* ── Suggested Routines ─────────────── */}
       {allRoutines.length > 0 && (
