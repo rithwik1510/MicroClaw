@@ -140,3 +140,206 @@ export async function savePersonaFile(filename: string, content: string): Promis
   });
   return res.json();
 }
+
+// ── Activity ───────────────────────────────────────────────────
+
+export interface ActivityEntry {
+  id: string;
+  type: 'heartbeat' | 'task' | 'runtime' | 'usage';
+  groupFolder: string;
+  timestamp: string;
+  status: 'ok' | 'acted' | 'success' | 'error';
+  summary: string;
+  durationMs?: number;
+  detail?: string;
+  tokenCount?: number;
+  costUsd?: number;
+}
+
+export interface DailySummary {
+  date: string;
+  heartbeats: { total: number; acted: number; errors: number };
+  tasks: { total: number; succeeded: number; failed: number };
+  tokens: { input: number; output: number; total: number };
+  costUsd: number;
+}
+
+export async function getActivity(params?: {
+  group?: string;
+  type?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ActivityEntry[]> {
+  const qs = new URLSearchParams();
+  if (params?.group) qs.set('group', params.group);
+  if (params?.type) qs.set('type', params.type);
+  if (params?.limit) qs.set('limit', String(params.limit));
+  if (params?.offset) qs.set('offset', String(params.offset));
+  const res = await fetch(`${BASE}/activity?${qs}`);
+  return res.json();
+}
+
+export async function getActivitySummary(date?: string): Promise<DailySummary> {
+  const qs = date ? `?date=${date}` : '';
+  const res = await fetch(`${BASE}/activity/summary${qs}`);
+  return res.json();
+}
+
+// ── Heartbeats ─────────────────────────────────────────────────
+
+export interface HeartbeatConfig {
+  groupFolder: string;
+  groupName: string;
+  hasChecklist: boolean;
+  intervalMs: number;
+  timeoutMs: number;
+  lastRun?: { timestamp: string; status: string; actionsTaken?: string };
+  recentRuns: Array<{ timestamp: string; status: string }>;
+}
+
+export interface HeartbeatDetail extends HeartbeatConfig {
+  content: string;
+  runHistory: Array<{
+    timestamp: string;
+    status: string;
+    actionsTaken?: string;
+    durationMs: number;
+    error?: string;
+  }>;
+}
+
+export async function getHeartbeats(): Promise<HeartbeatConfig[]> {
+  const res = await fetch(`${BASE}/heartbeats`);
+  return res.json();
+}
+
+export async function getHeartbeatDetail(groupFolder: string): Promise<HeartbeatDetail> {
+  const res = await fetch(`${BASE}/heartbeats/${encodeURIComponent(groupFolder)}`);
+  return res.json();
+}
+
+export async function saveHeartbeat(groupFolder: string, content: string, intervalMs?: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/heartbeats/${encodeURIComponent(groupFolder)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, intervalMs }),
+  });
+  return res.json();
+}
+
+export async function triggerHeartbeat(groupFolder: string): Promise<{ queued: boolean }> {
+  const res = await fetch(`${BASE}/heartbeats/${encodeURIComponent(groupFolder)}/run`, { method: 'POST' });
+  return res.json();
+}
+
+export async function deleteHeartbeat(groupFolder: string): Promise<{ deleted: boolean }> {
+  const res = await fetch(`${BASE}/heartbeats/${encodeURIComponent(groupFolder)}`, { method: 'DELETE' });
+  return res.json();
+}
+
+// ── Routines ───────────────────────────────────────────────────
+
+export interface DetectedRoutine {
+  keywords: string;
+  capability: string;
+  timeWindow: string;
+  occurrences: number;
+}
+
+export async function getRoutines(groupFolder: string): Promise<DetectedRoutine[]> {
+  const res = await fetch(`${BASE}/routines/${encodeURIComponent(groupFolder)}`);
+  return res.json();
+}
+
+export async function automateRoutine(groupFolder: string, description: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/routines/${encodeURIComponent(groupFolder)}/automate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ description }),
+  });
+  return res.json();
+}
+
+export async function dismissRoutineApi(groupFolder: string, keywords: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/routines/${encodeURIComponent(groupFolder)}/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keywords }),
+  });
+  return res.json();
+}
+
+// ── Lessons ────────────────────────────────────────────────────
+
+export interface Lesson {
+  id: number;
+  groupFolder: string;
+  createdAt: string;
+  triggerType: string;
+  errorSummary: string;
+  lessonText: string;
+  timesInjected: number;
+}
+
+export async function getLessons(groupFolder: string): Promise<Lesson[]> {
+  const res = await fetch(`${BASE}/lessons/${encodeURIComponent(groupFolder)}`);
+  return res.json();
+}
+
+export async function deleteLesson(id: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/lessons/${id}`, { method: 'DELETE' });
+  return res.json();
+}
+
+// ── Memories ───────────────────────────────────────────────────
+
+export interface MemoryEntry {
+  id: number;
+  group_folder: string;
+  kind: string;
+  content: string;
+  pinned: boolean;
+  confidence: number;
+  created_at: string;
+  last_confirmed_at: string;
+}
+
+export async function getMemories(params?: {
+  group?: string;
+  kind?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<MemoryEntry[]> {
+  const qs = new URLSearchParams();
+  if (params?.group) qs.set('group', params.group);
+  if (params?.kind) qs.set('kind', params.kind);
+  if (params?.q) qs.set('q', params.q);
+  if (params?.limit) qs.set('limit', String(params.limit));
+  if (params?.offset) qs.set('offset', String(params.offset));
+  const res = await fetch(`${BASE}/memories?${qs}`);
+  return res.json();
+}
+
+export async function updateMemory(id: number, content: string): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/memories/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  return res.json();
+}
+
+export async function deleteMemory(id: number): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/memories/${id}`, { method: 'DELETE' });
+  return res.json();
+}
+
+export async function toggleMemoryPin(id: number, pinned: boolean): Promise<{ ok: boolean }> {
+  const res = await fetch(`${BASE}/memories/${id}/pin`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned }),
+  });
+  return res.json();
+}
