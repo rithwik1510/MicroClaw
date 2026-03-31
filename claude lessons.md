@@ -302,3 +302,98 @@ The feature flags reveal Claude Code's roadmap:
 8. **Missed task detection on startup** — Ask user before running overdue tasks.
 9. **State-transition-reason pattern** — Make the message loop debuggable.
 10. **KAIROS dream distillation** — Nightly job that reviews daily notes and promotes important ones to durable memory.
+
+---
+
+## NanoClaw Self-Audit: Structural Issues to Fix
+
+Comparing NanoClaw's codebase against Claude Code's architecture reveals these concrete problems.
+
+### Critical: God Files
+
+| File | Lines | Problem |
+|------|-------|---------|
+| `src/db.ts` | 3,070 | 121 exported functions, 30+ tables in one file. Chats, tasks, heartbeats, memory, auth, lessons — all mixed together |
+| `src/core.ts` | 1,875 | God class with 50+ responsibilities: routing, channels, sessions, locks, typing, remote control, queue callbacks |
+| `src/context/builder.ts` | 1,318 | Context assembly, memory retrieval, token budgets, capability routing all in one |
+
+**What Claude Code does:** Separate modules by domain. Tools, permissions, compact, memory, cost tracking each get their own directory. The query engine is one file, but tools are split per-tool into directories.
+
+**Fix:** Split `db.ts` into domain modules (`db/chats.ts`, `db/tasks.ts`, `db/memory.ts`, `db/heartbeats.ts`, `db/lessons.ts`). Extract channel management, queue setup, and remote control from `core.ts` into separate service classes.
+
+### High: Conversation Summary Quality
+
+NanoClaw uses **regex heuristics** to classify messages into 4 buckets (goals, constraints, questions, decisions). Hard-capped at 2,200 chars. No preservation of user messages.
+
+Claude Code uses an **LLM-generated 9-section structured summary** with `<analysis>` scratchpad. Always preserves ALL user messages verbatim. Post-compact, re-reads the 5 most recently accessed files.
+
+**Impact:** NanoClaw loses intent after long conversations. Users experience "the agent forgot what I asked for."
+
+**Fix:** Replace `bucketSummarySignals()` regex approach with an LLM compact call using the 9-section format. Preserve all user messages. Re-read recent files after compaction.
+
+### High: Tool Result Size in Containers
+
+NanoClaw caps total container output at 10MB but individual tool results (grep, web_fetch) can be arbitrarily large within the container's context window. A single large grep can eat the entire context budget.
+
+Claude Code caps each tool result at `maxResultSizeChars`. Oversized results go to disk; model gets a preview + file path.
+
+**Fix:** Add per-tool-result size cap in the agent runner. Write full output to temp file, return truncated preview with path.
+
+### High: Message Loop Error Handling
+
+NanoClaw's `processGroupMessages()` tracks errors through 8+ separate local variables (`hadError`, `outputSentToUser`, `lastStreamError`, `partialBuffer`, etc.) with multiple code paths for different error combinations.
+
+Claude Code uses an explicit `State` object with a `transition: { reason }` field. Every retry records why it happened. Errors are withheld until recovery is exhausted.
+
+**Fix:** Refactor to explicit state object. Consolidate error recovery into one `handleErrorRecovery(state)` function.
+
+### Medium: Sequential Startup
+
+NanoClaw starts channels, database, tool services, and subsystems sequentially. With 4+ channels, cold start adds 5-15 seconds.
+
+Claude Code fires I/O-bound init as import-time side-effects that run in parallel with module evaluation.
+
+**Fix:** `Promise.all()` for channel connections. Overlap `ensureToolServicesReadyOnStartup()` with `initDatabase()`.
+
+### Medium: No Heartbeat Jitter
+
+All heartbeats fire at the same wall-clock moment, potentially exhausting `MAX_BACKGROUND_CONTAINERS` (default 2).
+
+Claude Code uses deterministic jitter seeded by task/group hash.
+
+**Fix:** Add `hashToRange(group.folder, HEARTBEAT_POLL_INTERVAL)` offset to heartbeat gap checks.
+
+### Medium: Missed Tasks Run Silently
+
+On restart, overdue one-shot tasks fire immediately without asking the user.
+
+Claude Code surfaces missed tasks for user confirmation.
+
+**Fix:** Query for active one-shot tasks with `next_run` in the past on startup. Ask the user before running them.
+
+### Low: Scattered Configuration
+
+Config constants live in 6+ files (`config.ts`, `heartbeat.ts`, `continuity.ts`, `group-queue.ts`, `task-scheduler.ts`, `context/config.ts`). No validation on parsed env values.
+
+**Fix:** Centralize all tunable constants in `config.ts` with Zod validation. Other files import from config.
+
+### Low: IPC Code Duplication
+
+The same 6-line error-handling block (log + mkdir + rename to errors/) is repeated 4 times in `ipc.ts`. The same try-catch broadcast block is repeated 3 times in `heartbeat.ts`.
+
+**Fix:** Extract `moveToErrorDir(file, sourceGroup)` helper. Extract `broadcastActivity(entry)` wrapper.
+
+### Priority Order (ROI)
+
+| # | Change | Effort | Impact |
+|---|--------|--------|--------|
+| 1 | 9-section structured compact | Medium | High |
+| 2 | Per-tool-result size cap in agent runner | Medium | High |
+| 3 | State-transition pattern in processGroupMessages | Medium-High | High |
+| 4 | Split db.ts into domain modules | Medium | Medium-High |
+| 5 | Deterministic heartbeat jitter | Low | Medium |
+| 6 | Parallel startup | Low-Medium | Medium |
+| 7 | Missed task detection on startup | Medium | Medium |
+| 8 | Extract repeated code patterns | Low | Low-Medium |
+| 9 | Centralize config with validation | Low | Low |
+| 10 | Branded types for GroupFolder/SystemPrompt | Low | Low |
