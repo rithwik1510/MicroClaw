@@ -9,6 +9,9 @@ import { agentsRouter } from './api/agents.js';
 import { chatsRouter } from './api/chats.js';
 import { personaRouter } from './api/persona.js';
 import { activityRouter } from './api/activity.js';
+import { routinesRouter } from './api/routines.js';
+import { lessonsRouter } from './api/lessons.js';
+import { memoriesRouter } from './api/memories.js';
 import { errorHandler } from './middleware.js';
 import { DashboardChannel } from '../src/channels/dashboard.js';
 import { setupWebSocket } from './ws.js';
@@ -31,6 +34,9 @@ export function createApp(core: AppCore): {
   app.use('/api', chatsRouter(core));
   app.use('/api', personaRouter());
   app.use('/api', activityRouter());
+  app.use('/api', routinesRouter());
+  app.use('/api', lessonsRouter());
+  app.use('/api', memoriesRouter());
 
   // Serve static UI (pre-built React app)
   const uiDistPath = path.resolve(__dirname, '../ui/dist');
