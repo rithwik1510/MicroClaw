@@ -88,6 +88,86 @@ export interface HeartbeatRunLog {
   error: string | null;
 }
 
+export interface ActivityEntry {
+  id: string;
+  type: 'heartbeat' | 'task' | 'runtime' | 'usage';
+  groupFolder: string;
+  timestamp: string;
+  status: 'ok' | 'acted' | 'success' | 'error';
+  summary: string;
+  durationMs?: number;
+  detail?: string;
+  tokenCount?: number;
+  costUsd?: number;
+}
+
+export interface DailySummary {
+  date: string;
+  heartbeats: { total: number; acted: number; errors: number };
+  tasks: { total: number; succeeded: number; failed: number };
+  tokens: { input: number; output: number; total: number };
+  costUsd: number;
+}
+
+export interface HeartbeatConfig {
+  groupFolder: string;
+  groupName: string;
+  hasChecklist: boolean;
+  intervalMs: number;
+  timeoutMs: number;
+  lastRun?: {
+    timestamp: string;
+    status: 'ok' | 'acted' | 'error';
+    actionsTaken?: string;
+  };
+  recentRuns: Array<{
+    timestamp: string;
+    status: 'ok' | 'acted' | 'error';
+  }>;
+}
+
+export interface HeartbeatDetail extends HeartbeatConfig {
+  content: string;
+  runHistory: Array<{
+    timestamp: string;
+    status: string;
+    actionsTaken?: string;
+    durationMs: number;
+    error?: string;
+  }>;
+}
+
+export interface RoutineSignal {
+  id: number;
+  groupFolder: string;
+  timestamp: string;
+  hourBucket: number;
+  dayOfWeek: number;
+  capability: string;
+  intentKeywords: string;
+  messageHash: string;
+}
+
+export interface DetectedRoutine {
+  keywords: string;
+  capability: string;
+  timeWindow: string;
+  occurrences: number;
+}
+
+export interface Lesson {
+  id: number;
+  groupFolder: string;
+  createdAt: string;
+  triggerType: 'task' | 'heartbeat';
+  triggerId?: string;
+  errorSummary: string;
+  lessonText: string;
+  keywords: string;
+  timesInjected: number;
+  dismissed: boolean;
+}
+
 export interface RuntimeUsageMetrics {
   inputTokens: number;
   outputTokens: number;

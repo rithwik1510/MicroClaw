@@ -24,6 +24,11 @@ import {
   TaskRunLog,
   HeartbeatRunLog,
   WizardSessionState,
+  ActivityEntry,
+  DailySummary,
+  RoutineSignal,
+  DetectedRoutine,
+  Lesson,
 } from './types.js';
 
 let db: Database.Database;
@@ -92,6 +97,42 @@ function createSchema(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_heartbeat_logs_group
       ON heartbeat_run_logs(group_folder, run_at);
+
+    CREATE TABLE IF NOT EXISTS routine_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      hour_bucket INTEGER NOT NULL,
+      day_of_week INTEGER NOT NULL,
+      capability TEXT NOT NULL,
+      intent_keywords TEXT NOT NULL,
+      message_hash TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_routine_signals_group
+      ON routine_signals(group_folder, timestamp);
+
+    CREATE TABLE IF NOT EXISTS dismissed_routines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      keywords TEXT NOT NULL,
+      dismissed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS lessons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      trigger_type TEXT NOT NULL,
+      trigger_id TEXT,
+      error_summary TEXT NOT NULL,
+      lesson_text TEXT NOT NULL,
+      keywords TEXT NOT NULL,
+      times_injected INTEGER DEFAULT 0,
+      dismissed INTEGER DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_lessons_group
+      ON lessons(group_folder, created_at);
 
     CREATE TABLE IF NOT EXISTS router_state (
       key TEXT PRIMARY KEY,
@@ -496,6 +537,10 @@ function createSchema(database: Database.Database): void {
   if (!chatCols.some((c) => c.name === 'source')) {
     database.exec(`ALTER TABLE chats ADD COLUMN source TEXT DEFAULT 'legacy'`);
   }
+
+  try {
+    database.exec(`ALTER TABLE memory_entries ADD COLUMN episode_id TEXT`);
+  } catch { /* column already exists */ }
 }
 
 export function initDatabase(): void {
@@ -2647,4 +2692,272 @@ export function setSetupValue(key: string, value: string): void {
     key,
     value,
   );
+}
+
+// ── Activity feed ──────────────────────────────────────────────
+export function getActivityFeed(opts: {
+  group?: string;
+  type?: string[];
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}): ActivityEntry[] {
+  const limit = opts.limit || 50;
+  const offset = opts.offset || 0;
+  const params: any[] = [];
+
+  // Build each sub-query with its own WHERE conditions
+  let hbWhere = '';
+  let trlWhere = '';
+  let usageWhere = '';
+
+  const hbConditions: string[] = [];
+  const trlConditions: string[] = [];
+  const usageConditions: string[] = [];
+
+  if (opts.group) {
+    hbConditions.push('group_folder = ?');
+    trlConditions.push('st.group_folder = ?');
+    usageConditions.push('group_folder = ?');
+  }
+  if (opts.since) {
+    hbConditions.push('run_at >= ?');
+    trlConditions.push('trl.run_at >= ?');
+    usageConditions.push('started_at >= ?');
+  }
+  if (opts.until) {
+    hbConditions.push('run_at <= ?');
+    trlConditions.push('trl.run_at <= ?');
+    usageConditions.push('started_at <= ?');
+  }
+
+  if (hbConditions.length) hbWhere = `WHERE ${hbConditions.join(' AND ')}`;
+  if (trlConditions.length) trlWhere = `WHERE ${trlConditions.join(' AND ')}`;
+  if (usageConditions.length) usageWhere = `WHERE ${usageConditions.join(' AND ')}`;
+
+  // Build params array — each sub-query gets its own copy of filter values
+  const filterValues: any[] = [];
+  if (opts.group) filterValues.push(opts.group);
+  if (opts.since) filterValues.push(opts.since);
+  if (opts.until) filterValues.push(opts.until);
+
+  // Three copies of filter values (one per sub-query in UNION)
+  params.push(...filterValues, ...filterValues, ...filterValues, limit, offset);
+
+  const sql = `
+    SELECT CAST(id AS TEXT) as id, 'heartbeat' as type, group_folder as groupFolder, run_at as timestamp,
+           status, COALESCE(actions_taken, 'Silent check — all clear') as summary,
+           duration_ms as durationMs, error as detail, NULL as tokenCount, NULL as costUsd
+    FROM heartbeat_run_logs ${hbWhere}
+    UNION ALL
+    SELECT CAST(trl.id AS TEXT) as id, 'task' as type, st.group_folder as groupFolder, trl.run_at as timestamp,
+           trl.status, COALESCE(st.prompt, 'Scheduled task') as summary,
+           trl.duration_ms as durationMs, COALESCE(trl.error, trl.result) as detail,
+           NULL as tokenCount, NULL as costUsd
+    FROM task_run_logs trl JOIN scheduled_tasks st ON trl.task_id = st.id
+    ${trlWhere}
+    UNION ALL
+    SELECT CAST(id AS TEXT) as id, 'usage' as type, group_folder as groupFolder, started_at as timestamp,
+           'success' as status,
+           model || ' — ' || total_tokens || ' tokens' as summary,
+           duration_ms as durationMs, notes as detail, total_tokens as tokenCount,
+           total_cost_usd as costUsd
+    FROM runtime_usage_logs ${usageWhere}
+    ORDER BY timestamp DESC
+    LIMIT ? OFFSET ?
+  `;
+
+  return db.prepare(sql).all(...params) as ActivityEntry[];
+}
+
+export function getDailySummary(date: string): DailySummary {
+  const nextDate = new Date(new Date(date).getTime() + 86400000).toISOString().slice(0, 10);
+
+  const hb = db.prepare(`
+    SELECT COUNT(*) as total,
+           SUM(CASE WHEN status = 'acted' THEN 1 ELSE 0 END) as acted,
+           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors
+    FROM heartbeat_run_logs WHERE run_at >= ? AND run_at < ?
+  `).get(date, nextDate) as any;
+
+  const tasks = db.prepare(`
+    SELECT COUNT(*) as total,
+           SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as succeeded,
+           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failed
+    FROM task_run_logs WHERE run_at >= ? AND run_at < ?
+  `).get(date, nextDate) as any;
+
+  const usage = db.prepare(`
+    SELECT COALESCE(SUM(input_tokens), 0) as input,
+           COALESCE(SUM(output_tokens), 0) as output,
+           COALESCE(SUM(total_tokens), 0) as total,
+           COALESCE(SUM(total_cost_usd), 0) as cost
+    FROM runtime_usage_logs WHERE started_at >= ? AND started_at < ?
+  `).get(date, nextDate) as any;
+
+  return {
+    date,
+    heartbeats: { total: hb.total, acted: hb.acted || 0, errors: hb.errors || 0 },
+    tasks: { total: tasks.total, succeeded: tasks.succeeded || 0, failed: tasks.failed || 0 },
+    tokens: { input: usage.input, output: usage.output, total: usage.total },
+    costUsd: usage.cost,
+  };
+}
+
+// ── Routine signals ────────────────────────────────────────────
+export function insertRoutineSignal(signal: Omit<RoutineSignal, 'id'>): void {
+  db.prepare(`
+    INSERT INTO routine_signals (group_folder, timestamp, hour_bucket, day_of_week, capability, intent_keywords, message_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(signal.groupFolder, signal.timestamp, signal.hourBucket, signal.dayOfWeek,
+         signal.capability, signal.intentKeywords, signal.messageHash);
+}
+
+export function detectRoutinePatterns(groupFolder: string, days = 14): DetectedRoutine[] {
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+
+  const dismissed = db.prepare(`
+    SELECT keywords FROM dismissed_routines
+    WHERE group_folder = ? AND expires_at > ?
+  `).all(groupFolder, new Date().toISOString()) as Array<{ keywords: string }>;
+  const dismissedSet = new Set(dismissed.map(d => d.keywords));
+
+  const patterns = db.prepare(`
+    SELECT capability, intent_keywords,
+           CAST(hour_bucket / 2 AS INTEGER) as time_window,
+           COUNT(*) as occurrences
+    FROM routine_signals
+    WHERE group_folder = ? AND timestamp >= ?
+    GROUP BY capability, intent_keywords, time_window
+    HAVING COUNT(*) >= 3
+    ORDER BY occurrences DESC
+    LIMIT 10
+  `).all(groupFolder, since) as Array<{
+    capability: string;
+    intent_keywords: string;
+    time_window: number;
+    occurrences: number;
+  }>;
+
+  return patterns
+    .filter(p => !dismissedSet.has(p.intent_keywords))
+    .map(p => ({
+      keywords: p.intent_keywords,
+      capability: p.capability,
+      timeWindow: `${p.time_window * 2}:00-${p.time_window * 2 + 2}:00`,
+      occurrences: p.occurrences,
+    }));
+}
+
+export function dismissRoutine(groupFolder: string, keywords: string, days = 30): void {
+  const now = new Date();
+  const expires = new Date(now.getTime() + days * 86400000);
+  db.prepare(`
+    INSERT INTO dismissed_routines (group_folder, keywords, dismissed_at, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).run(groupFolder, keywords, now.toISOString(), expires.toISOString());
+}
+
+// ── Lessons ────────────────────────────────────────────────────
+export function insertLesson(lesson: Omit<Lesson, 'id' | 'timesInjected' | 'dismissed'>): void {
+  db.prepare(`
+    INSERT INTO lessons (group_folder, created_at, trigger_type, trigger_id, error_summary, lesson_text, keywords)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(lesson.groupFolder, lesson.createdAt, lesson.triggerType, lesson.triggerId || null,
+         lesson.errorSummary, lesson.lessonText, lesson.keywords);
+}
+
+export function getLessonsForGroup(groupFolder: string, limit = 20): Lesson[] {
+  return db.prepare(`
+    SELECT id, group_folder as groupFolder, created_at as createdAt, trigger_type as triggerType,
+           trigger_id as triggerId, error_summary as errorSummary, lesson_text as lessonText,
+           keywords, times_injected as timesInjected, dismissed
+    FROM lessons
+    WHERE group_folder = ? AND dismissed = 0
+    ORDER BY created_at DESC LIMIT ?
+  `).all(groupFolder, limit) as Lesson[];
+}
+
+export function queryLessonsByKeywords(groupFolder: string, keywords: string[], limit = 5): Lesson[] {
+  if (keywords.length === 0) return [];
+  const likeConditions = keywords.map(() => `keywords LIKE ?`).join(' OR ');
+  const params = keywords.map(k => `%${k}%`);
+  return db.prepare(`
+    SELECT id, group_folder as groupFolder, created_at as createdAt, trigger_type as triggerType,
+           trigger_id as triggerId, error_summary as errorSummary, lesson_text as lessonText,
+           keywords, times_injected as timesInjected, dismissed
+    FROM lessons
+    WHERE group_folder = ? AND dismissed = 0 AND (${likeConditions})
+    ORDER BY created_at DESC LIMIT ?
+  `).all(groupFolder, ...params, limit) as Lesson[];
+}
+
+export function incrementLessonInjections(ids: number[]): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  db.prepare(`UPDATE lessons SET times_injected = times_injected + 1 WHERE id IN (${placeholders})`).run(...ids);
+}
+
+export function dismissLesson(id: number): void {
+  db.prepare(`UPDATE lessons SET dismissed = 1 WHERE id = ?`).run(id);
+}
+
+// ── Heartbeat runs (extended queries) ──────────────────────────
+export function getRecentHeartbeatRuns(groupFolder: string, limit = 5): Array<{
+  timestamp: string;
+  status: string;
+  actionsTaken: string | null;
+  durationMs: number;
+  error: string | null;
+}> {
+  return db.prepare(`
+    SELECT run_at as timestamp, status, actions_taken as actionsTaken,
+           duration_ms as durationMs, error
+    FROM heartbeat_run_logs
+    WHERE group_folder = ?
+    ORDER BY run_at DESC LIMIT ?
+  `).all(groupFolder, limit) as any[];
+}
+
+// ── Memory (extended queries for dashboard) ────────────────────
+export function getMemoryEntries(opts: {
+  group?: string;
+  kind?: string;
+  query?: string;
+  limit?: number;
+  offset?: number;
+}): Array<{ id: number; group_folder: string; kind: string; content: string; pinned: boolean; confidence: number; created_at: string; last_confirmed_at: string }> {
+  const limit = opts.limit || 50;
+  const offset = opts.offset || 0;
+  const conditions: string[] = ['superseded_at IS NULL'];
+  const params: any[] = [];
+
+  if (opts.group) { conditions.push('group_folder = ?'); params.push(opts.group); }
+  if (opts.kind) { conditions.push('kind = ?'); params.push(opts.kind); }
+  if (opts.query) { conditions.push('content LIKE ?'); params.push(`%${opts.query}%`); }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit, offset);
+
+  return db.prepare(`
+    SELECT id, group_folder, kind, content, pinned, confidence, created_at, last_confirmed_at
+    FROM memory_entries ${where}
+    ORDER BY created_at DESC LIMIT ? OFFSET ?
+  `).all(...params) as any[];
+}
+
+export function updateMemoryContent(id: number, content: string): void {
+  db.prepare(`UPDATE memory_entries SET content = ?, content_normalized = ? WHERE id = ?`)
+    .run(content, content.toLowerCase().trim(), id);
+}
+
+export function deleteMemoryEntry(id: number): void {
+  db.prepare(`DELETE FROM memory_entries WHERE id = ?`).run(id);
+}
+
+export function toggleMemoryPin(id: number, pinned: boolean): void {
+  db.prepare(`UPDATE memory_entries SET pinned = ?, durability = ? WHERE id = ?`)
+    .run(pinned ? 1 : 0, pinned ? 'pinned' : 'durable', id);
 }
