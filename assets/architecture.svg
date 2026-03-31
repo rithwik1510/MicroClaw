@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 340" fill="none">
+  <defs>
+    <linearGradient id="aBg" x1="0" y1="0" x2="860" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0a0e1a"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#0891b2"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="pink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ec4899"/>
+      <stop offset="100%" stop-color="#db2777"/>
+    </linearGradient>
+    <linearGradient id="emerald" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="flowLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0.8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="860" height="340" rx="12" fill="url(#aBg)"/>
+
+  <!-- Title -->
+  <text x="430" y="32" text-anchor="middle" font-family="'Segoe UI', system-ui, sans-serif" font-weight="700" font-size="14" fill="#94a3b8" letter-spacing="3">SYSTEM ARCHITECTURE</text>
+
+  <!-- === LAYER 1: Channels (left) === -->
+  <g transform="translate(30, 55)">
+    <rect width="120" height="240" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="60" y="22" text-anchor="middle" font-family="monospace" font-size="10" fill="#64748b" letter-spacing="1">CHANNELS</text>
+    <rect x="12" y="36" width="96" height="30" rx="6" fill="#164e63" opacity="0.5"/>
+    <text x="60" y="55" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#06b6d4">WhatsApp</text>
+    <rect x="12" y="74" width="96" height="30" rx="6" fill="#164e63" opacity="0.5"/>
+    <text x="60" y="93" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#06b6d4">Telegram</text>
+    <rect x="12" y="112" width="96" height="30" rx="6" fill="#164e63" opacity="0.5"/>
+    <text x="60" y="131" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#06b6d4">Discord</text>
+    <rect x="12" y="150" width="96" height="30" rx="6" fill="#164e63" opacity="0.5"/>
+    <text x="60" y="169" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#06b6d4">Slack</text>
+    <rect x="12" y="188" width="96" height="30" rx="6" fill="#164e63" opacity="0.5"/>
+    <text x="60" y="207" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#06b6d4">Gmail</text>
+  </g>
+
+  <!-- Arrow: Channels -> Orchestrator -->
+  <line x1="155" y1="175" x2="195" y2="175" stroke="url(#flowLine)" stroke-width="2" marker-end="url(#arrowCyan)"/>
+  <defs>
+    <marker id="arrowCyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#06b6d4"/>
+    </marker>
+    <marker id="arrowViolet" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#8b5cf6"/>
+    </marker>
+  </defs>
+
+  <!-- === LAYER 2: Orchestrator (center-left) === -->
+  <g transform="translate(200, 55)">
+    <rect width="170" height="240" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="85" y="22" text-anchor="middle" font-family="monospace" font-size="10" fill="#64748b" letter-spacing="1">ORCHESTRATOR</text>
+    <rect x="12" y="36" width="146" height="28" rx="6" fill="#2e1065" opacity="0.4"/>
+    <text x="85" y="54" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#a78bfa">SQLite State</text>
+    <rect x="12" y="72" width="146" height="28" rx="6" fill="#2e1065" opacity="0.4"/>
+    <text x="85" y="90" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#a78bfa">Capability Router</text>
+    <rect x="12" y="108" width="146" height="28" rx="6" fill="#2e1065" opacity="0.4"/>
+    <text x="85" y="126" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#a78bfa">Context Builder</text>
+    <rect x="12" y="144" width="146" height="28" rx="6" fill="#2e1065" opacity="0.4"/>
+    <text x="85" y="162" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#a78bfa">Group Queue</text>
+    <rect x="12" y="180" width="146" height="28" rx="6" fill="#2e1065" opacity="0.4"/>
+    <text x="85" y="198" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#a78bfa">Task Scheduler</text>
+  </g>
+
+  <!-- Arrow: Orchestrator -> Runtime -->
+  <line x1="375" y1="175" x2="415" y2="175" stroke="url(#flowLine)" stroke-width="2" marker-end="url(#arrowViolet)"/>
+
+  <!-- === LAYER 3: Runtime (center-right) === -->
+  <g transform="translate(420, 55)">
+    <rect width="170" height="240" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="85" y="22" text-anchor="middle" font-family="monospace" font-size="10" fill="#64748b" letter-spacing="1">AGENT RUNTIME</text>
+    <rect x="12" y="36" width="146" height="28" rx="6" fill="#831843" opacity="0.3"/>
+    <text x="85" y="54" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#f472b6">Any LLM Backend</text>
+    <rect x="12" y="72" width="146" height="28" rx="6" fill="#831843" opacity="0.3"/>
+    <text x="85" y="90" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#f472b6">Tool Loop Engine</text>
+    <rect x="12" y="108" width="146" height="28" rx="6" fill="#831843" opacity="0.3"/>
+    <text x="85" y="126" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#f472b6">Bootstrap Injection</text>
+    <rect x="12" y="144" width="146" height="28" rx="6" fill="#831843" opacity="0.3"/>
+    <text x="85" y="162" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#f472b6">Warm Sessions</text>
+    <rect x="12" y="180" width="146" height="28" rx="6" fill="#831843" opacity="0.3"/>
+    <text x="85" y="198" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#f472b6">Streaming Output</text>
+  </g>
+
+  <!-- Arrow: Runtime -> Tools -->
+  <line x1="595" y1="175" x2="635" y2="175" stroke="url(#flowLine)" stroke-width="2" marker-end="url(#arrowViolet)"/>
+
+  <!-- === LAYER 4: Tools (right) === -->
+  <g transform="translate(640, 55)">
+    <rect width="190" height="240" rx="8" fill="#0f172a" stroke="#1e293b" stroke-width="1"/>
+    <text x="95" y="22" text-anchor="middle" font-family="monospace" font-size="10" fill="#64748b" letter-spacing="1">TOOL FAMILIES</text>
+    <rect x="12" y="36" width="82" height="26" rx="6" fill="#064e3b" opacity="0.4"/>
+    <text x="53" y="53" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#34d399">Web (6)</text>
+    <rect x="100" y="36" width="78" height="26" rx="6" fill="#064e3b" opacity="0.4"/>
+    <text x="139" y="53" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#34d399">Browser (9)</text>
+    <rect x="12" y="70" width="82" height="26" rx="6" fill="#064e3b" opacity="0.4"/>
+    <text x="53" y="87" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#34d399">Host Files (11)</text>
+    <rect x="100" y="70" width="78" height="26" rx="6" fill="#064e3b" opacity="0.4"/>
+    <text x="139" y="87" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#34d399">Memory (2)</text>
+    <rect x="12" y="104" width="166" height="26" rx="6" fill="#064e3b" opacity="0.4"/>
+    <text x="95" y="121" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#34d399">Meta / Scheduling (5)</text>
+
+    <!-- Isolation box -->
+    <rect x="12" y="145" width="166" height="80" rx="6" fill="#1e293b" opacity="0.5" stroke="#334155" stroke-width="0.5" stroke-dasharray="4,3"/>
+    <text x="95" y="163" text-anchor="middle" font-family="monospace" font-size="9" fill="#64748b">SANDBOX</text>
+    <text x="95" y="183" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#94a3b8">Docker / Apple Container</text>
+    <text x="95" y="200" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#94a3b8">Isolated Filesystem</text>
+    <text x="95" y="217" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="10" fill="#94a3b8">Per-Group Mounts</text>
+  </g>
+
+  <!-- Bottom label -->
+  <text x="430" y="325" text-anchor="middle" font-family="'Segoe UI', sans-serif" font-size="11" fill="#475569">Single Node.js process  ·  BYOK model backends  ·  Filesystem IPC  ·  Container isolation</text>
+</svg>
