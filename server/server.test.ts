@@ -40,6 +40,7 @@ function createMockCore() {
       groups[jid] = group;
     },
     queue: { enqueueMessageCheck: vi.fn() },
+    triggerHeartbeat: vi.fn().mockReturnValue(false),
   };
 }
 
@@ -101,5 +102,94 @@ describe('server integration', () => {
     createApp(core as any);
     expect(core.getChannels().length).toBe(1);
     expect(core.getChannels()[0].name).toBe('dashboard');
+  });
+});
+
+describe('activity API', () => {
+  let core: ReturnType<typeof createMockCore>;
+
+  beforeEach(() => {
+    _initTestDatabase();
+    core = createMockCore();
+  });
+
+  it('GET /api/activity returns empty feed initially', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/activity');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  it('GET /api/activity/summary returns zeroed summary', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/activity/summary');
+    expect(res.status).toBe(200);
+    expect(res.body.heartbeats.total).toBe(0);
+    expect(res.body.tasks.total).toBe(0);
+    expect(res.body.tokens.total).toBe(0);
+  });
+});
+
+describe('heartbeats API', () => {
+  let core: ReturnType<typeof createMockCore>;
+
+  beforeEach(() => {
+    _initTestDatabase();
+    core = createMockCore();
+  });
+
+  it('GET /api/heartbeats returns list', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/heartbeats');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+  });
+});
+
+describe('memories API', () => {
+  let core: ReturnType<typeof createMockCore>;
+
+  beforeEach(() => {
+    _initTestDatabase();
+    core = createMockCore();
+  });
+
+  it('GET /api/memories returns empty list initially', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/memories');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+});
+
+describe('lessons API', () => {
+  let core: ReturnType<typeof createMockCore>;
+
+  beforeEach(() => {
+    _initTestDatabase();
+    core = createMockCore();
+  });
+
+  it('GET /api/lessons/:group returns empty list', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/lessons/test_group');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+});
+
+describe('routines API', () => {
+  let core: ReturnType<typeof createMockCore>;
+
+  beforeEach(() => {
+    _initTestDatabase();
+    core = createMockCore();
+  });
+
+  it('GET /api/routines/:group returns empty list', async () => {
+    const { app } = createApp(core as any);
+    const res = await request(app).get('/api/routines/test_group');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
   });
 });
