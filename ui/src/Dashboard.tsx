@@ -5,7 +5,6 @@ import { getExistingGroups, createChat, getChatMessages, getSetup } from './api'
 import type { ExistingGroup, ChatMessage } from './api';
 import { PersonaPage } from './PersonaPage';
 import { ActivityPage } from './ActivityPage';
-import { MemoryPage } from './MemoryPage';
 
 interface SidebarItem {
   id: string;       // unique key for sidebar
@@ -41,7 +40,7 @@ export function Dashboard() {
   const [defaultModel, setDefaultModel] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeView, setActiveView] = useState<'chat' | 'persona'>('chat');
-  const [activeTab, setActiveTab] = useState<'chats' | 'activity' | 'memory'>('chats');
+  const [activeTab, setActiveTab] = useState<'chats' | 'activity'>('chats');
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -240,10 +239,6 @@ export function Dashboard() {
             className={`sidebar-tab ${activeTab === 'activity' ? 'active' : ''}`}
             onClick={() => setActiveTab('activity')}
           >Activity</button>
-          <button
-            className={`sidebar-tab ${activeTab === 'memory' ? 'active' : ''}`}
-            onClick={() => setActiveTab('memory')}
-          >Memory</button>
         </div>
 
         {activeTab === 'chats' && (
@@ -314,17 +309,6 @@ export function Dashboard() {
             transition={{ duration: 0.2 }}
           >
             <ActivityPage wsRef={wsRef} />
-          </motion.div>
-        ) : activeTab === 'memory' ? (
-          <motion.div
-            key="memory"
-            style={{ flex: 1, display: 'flex', width: '100%' }}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2 }}
-          >
-            <MemoryPage />
           </motion.div>
         ) : activeView === 'persona' ? (
           <PersonaPage />
