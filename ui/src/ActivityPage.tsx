@@ -103,6 +103,15 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
 
   /* ── Heartbeat expand / editor ───────────── */
 
+  const DEFAULT_TEMPLATE = `# Heartbeat Checklist
+
+## Silent checks
+- Review recent failed scheduled tasks. Only notify if something needs attention.
+
+## Watch items
+- Add your watch or reminder instructions here.
+`;
+
   const toggleHeartbeat = useCallback(async (groupFolder: string) => {
     if (expandedHb === groupFolder) {
       setExpandedHb(null);
@@ -113,10 +122,13 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
     try {
       const detail = await getHeartbeatDetail(groupFolder);
       setHbDetail(detail);
-      setEditorContent(detail.content);
+      setEditorContent(detail.content || DEFAULT_TEMPLATE);
       setEditorInterval(detail.intervalMs);
     } catch {
+      // Group exists but no heartbeat file — show template for creation
       setHbDetail(null);
+      setEditorContent(DEFAULT_TEMPLATE);
+      setEditorInterval(INTERVAL_OPTIONS[1].ms); // default 30m
     }
   }, [expandedHb]);
 
@@ -181,8 +193,10 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
         <div className="activity-section-title">
           <span>Heartbeats</span>
         </div>
+
+        {/* Active heartbeats — groups that have a HEARTBEAT.md */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
-          {heartbeats.map(hb => (
+          {heartbeats.filter(hb => hb.hasChecklist).map(hb => (
             <div key={hb.groupFolder}>
               <motion.div
                 className="heartbeat-card"
@@ -192,7 +206,7 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
                 <span className="heartbeat-name">{hb.groupName}</span>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                   <span className="heartbeat-meta">
-                    {formatInterval(hb.intervalMs)}
+                    every {formatInterval(hb.intervalMs)}
                     {hb.lastRun ? ` \u00B7 ${relativeTime(hb.lastRun.timestamp)}` : ''}
                   </span>
                   <div className="status-dots">
@@ -250,12 +264,70 @@ export function ActivityPage({ wsRef }: ActivityPageProps) {
             </div>
           ))}
 
-          {heartbeats.length === 0 && (
+          {heartbeats.filter(hb => hb.hasChecklist).length === 0 && (
             <div style={{ color: 'var(--text-muted)', fontSize: '0.85rem', padding: '8px 0' }}>
-              No heartbeats configured yet.
+              No heartbeats configured yet. Add one below.
             </div>
           )}
         </div>
+
+        {/* Unconfigured groups — can add a heartbeat */}
+        {heartbeats.filter(hb => !hb.hasChecklist).length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.03em', fontFamily: 'var(--font-body)' }}>
+              Add heartbeat
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {heartbeats.filter(hb => !hb.hasChecklist).map(hb => (
+                <div key={hb.groupFolder}>
+                  <motion.div
+                    className="heartbeat-card"
+                    style={{ opacity: 0.7 }}
+                    onClick={() => toggleHeartbeat(hb.groupFolder)}
+                    layout
+                  >
+                    <span className="heartbeat-name">{hb.groupName}</span>
+                    <span className="heartbeat-meta" style={{ color: 'var(--accent)' }}>+ add</span>
+                  </motion.div>
+
+                  <AnimatePresence>
+                    {expandedHb === hb.groupFolder && (
+                      <motion.div
+                        className="heartbeat-editor"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                        layout
+                      >
+                        <textarea
+                          value={editorContent}
+                          onChange={e => setEditorContent(e.target.value)}
+                          placeholder={"# Heartbeat Checklist\n\n## Silent checks\n- Review recent failed scheduled tasks.\n\n## Watch items\n- Add your watch instructions here."}
+                          spellCheck={false}
+                        />
+                        <div className="interval-pills">
+                          {INTERVAL_OPTIONS.map(opt => (
+                            <button
+                              key={opt.ms}
+                              className={`interval-pill ${editorInterval === opt.ms ? 'active' : ''}`}
+                              onClick={() => setEditorInterval(opt.ms)}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                          <button className="btn-small primary" onClick={handleSaveHeartbeat}>Create</button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ── Suggested Routines ─────────────── */}
