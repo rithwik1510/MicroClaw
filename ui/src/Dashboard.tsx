@@ -4,6 +4,8 @@ import Markdown from 'react-markdown';
 import { getExistingGroups, createChat, getChatMessages, getSetup } from './api';
 import type { ExistingGroup, ChatMessage } from './api';
 import { PersonaPage } from './PersonaPage';
+import { ActivityPage } from './ActivityPage';
+import { MemoryPage } from './MemoryPage';
 
 interface SidebarItem {
   id: string;       // unique key for sidebar
@@ -39,6 +41,7 @@ export function Dashboard() {
   const [defaultModel, setDefaultModel] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [activeView, setActiveView] = useState<'chat' | 'persona'>('chat');
+  const [activeTab, setActiveTab] = useState<'chats' | 'activity' | 'memory'>('chats');
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -134,6 +137,7 @@ export function Dashboard() {
 
   async function selectItem(item: SidebarItem) {
     setActiveView('chat');
+    setActiveTab('chats');
     setActiveId(item.id);
 
     if (!chats[item.id]) {
@@ -227,6 +231,23 @@ export function Dashboard() {
           </button>
         </div>
 
+        <div className="sidebar-tabs">
+          <button
+            className={`sidebar-tab ${activeTab === 'chats' ? 'active' : ''}`}
+            onClick={() => setActiveTab('chats')}
+          >Chats</button>
+          <button
+            className={`sidebar-tab ${activeTab === 'activity' ? 'active' : ''}`}
+            onClick={() => setActiveTab('activity')}
+          >Activity</button>
+          <button
+            className={`sidebar-tab ${activeTab === 'memory' ? 'active' : ''}`}
+            onClick={() => setActiveTab('memory')}
+          >Memory</button>
+        </div>
+
+        {activeTab === 'chats' && (
+        <>
         <div className="sidebar-section-label">Agents</div>
 
         <div className="sidebar-agents">
@@ -263,6 +284,8 @@ export function Dashboard() {
             <span>New Chat</span>
           </button>
         </div>
+        </>
+        )}
       </motion.div>
 
       {/* Floating toggle when sidebar is closed */}
@@ -278,9 +301,32 @@ export function Dashboard() {
         </motion.button>
       )}
 
-      {/* Chat Area */}
+      {/* Main Content Area */}
       <div className="chat-area">
-        {activeView === 'persona' ? (
+        <AnimatePresence mode="wait">
+        {activeTab === 'activity' ? (
+          <motion.div
+            key="activity"
+            style={{ flex: 1, display: 'flex', width: '100%' }}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+          >
+            <ActivityPage wsRef={wsRef} />
+          </motion.div>
+        ) : activeTab === 'memory' ? (
+          <motion.div
+            key="memory"
+            style={{ flex: 1, display: 'flex', width: '100%' }}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+          >
+            <MemoryPage />
+          </motion.div>
+        ) : activeView === 'persona' ? (
           <PersonaPage />
         ) : activeItem ? (
           <>
@@ -500,6 +546,7 @@ export function Dashboard() {
             </motion.p>
           </div>
         )}
+        </AnimatePresence>
       </div>
 
       {/* Create Agent Modal */}
