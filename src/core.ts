@@ -69,9 +69,14 @@ import {
   appendDailyMemoryNotes,
   extractMemoryCandidates,
 } from './context/memory.js';
-import { insertMemoryEntry } from './db.js';
+import { insertMemoryEntry, insertRoutineSignal } from './db.js';
+import { createHash } from 'crypto';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import { startHeartbeatLoop } from './heartbeat.js';
+import {
+  loadHeartbeatChecklist,
+  runHeartbeat,
+  startHeartbeatLoop,
+} from './heartbeat.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -158,8 +163,10 @@ export class AppCore {
 
   // --- Public API ---
 
-  async start(): Promise<void> {
-    this.acquireProcessLock();
+  async start(opts?: { skipProcessLock?: boolean }): Promise<void> {
+    if (!opts?.skipProcessLock) {
+      this.acquireProcessLock();
+    }
     this.ensureContainerSystemRunning();
     initDatabase();
     migrateToLocalOnlyIfNeeded();
@@ -223,7 +230,7 @@ export class AppCore {
     this.stopAllTypingHeartbeats();
     await this.queue.shutdown(10000);
     for (const ch of this.channels) await ch.disconnect();
-    this.releaseProcessLock();
+    if (this.hasProcessLock) this.releaseProcessLock();
     this.running = false;
   }
 
@@ -257,6 +264,43 @@ export class AppCore {
       }));
   }
 
+  /**
+   * Manually trigger a heartbeat run for a specific group JID.
+   * Enqueues as a background task if the group exists and has a heartbeat checklist.
+   */
+  triggerHeartbeat(groupJid: string): boolean {
+    const group = this.registeredGroups[groupJid];
+    if (!group) return false;
+
+    const checklist = loadHeartbeatChecklist(group.folder);
+    if (!checklist) return false;
+
+    const deps = {
+      registeredGroups: () => this.registeredGroups,
+      queue: this.queue,
+      onProcess: (
+        jid: string,
+        proc: import('child_process').ChildProcess,
+        containerName: string,
+        groupFolder: string,
+      ) => this.queue.registerProcess(jid, proc, containerName, groupFolder),
+      sendMessage: async (jid: string, rawText: string) => {
+        const channel = findChannel(this.channels, jid);
+        if (!channel) return;
+        const text = formatOutbound(rawText);
+        if (text) await channel.sendMessage(jid, text);
+      },
+    };
+
+    this.queue.enqueueTask(
+      groupJid,
+      `heartbeat:${group.folder}:manual:${Date.now()}`,
+      () => runHeartbeat(groupJid, group, checklist, deps),
+      { lane: 'background' },
+    );
+    return true;
+  }
+
   /** @internal - exported for testing */
   _setRegisteredGroups(groups: Record<string, RegisteredGroup>): void {
     this.registeredGroups = groups;
@@ -279,6 +323,16 @@ export class AppCore {
 
     // Create group folder
     fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+    // Initialize per-group CLAUDE.md if missing (dashboard groups need identity context)
+    const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
+    if (!fs.existsSync(claudeMdPath)) {
+      const channelType = jid.startsWith('dashboard:') ? 'dashboard' : 'chat';
+      fs.writeFileSync(
+        claudeMdPath,
+        `# ${group.name}\n\nThis is a ${channelType} channel. Use standard Markdown formatting.\n\nRefer to global context (SOUL.md, STYLE.md, USER.md) for identity and preferences.\n`,
+      );
+    }
 
     // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
     this.ensureOneCLIAgent(jid, group);
@@ -922,13 +976,26 @@ export class AppCore {
   private async processGroupMessages(chatJid: string): Promise<boolean> {
     const processingStartedAt = Date.now();
     const group = this.registeredGroups[chatJid];
-    if (!group) return true;
+    if (!group) {
+      logger.warn({ chatJid }, 'processGroupMessages: no registered group');
+      return true;
+    }
 
     const channel = findChannel(this.channels, chatJid);
     if (!channel) {
       logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
       return true;
     }
+
+    logger.info(
+      {
+        chatJid,
+        group: group.name,
+        channel: channel.name,
+        folder: group.folder,
+      },
+      'processGroupMessages: starting',
+    );
 
     const isMainGroup = group.isMain === true;
 
@@ -1512,6 +1579,33 @@ export class AppCore {
           prompt,
           toolPolicy: resolved.runtimeConfig.toolPolicy,
         });
+
+        // Collect routine signal for pattern detection
+        try {
+          const now = new Date();
+          const signalKeywords = prompt
+            .split(/\s+/)
+            .filter((w: string) => w.length > 4 && /^[a-zA-Z]+$/.test(w))
+            .slice(0, 3)
+            .join(',');
+          if (signalKeywords.length > 0) {
+            insertRoutineSignal({
+              groupFolder: group.folder,
+              timestamp: now.toISOString(),
+              hourBucket: now.getHours(),
+              dayOfWeek: now.getDay(),
+              capability: capabilityRoute,
+              intentKeywords: signalKeywords,
+              messageHash: createHash('md5')
+                .update(prompt.slice(0, 200))
+                .digest('hex')
+                .slice(0, 8),
+            });
+          }
+        } catch {
+          /* signal collection is non-critical */
+        }
+
         const turnMode = this.resolveContextTurnMode(prompt, capabilityRoute);
         const contextBudget = this.contextToolBudgetForTurnMode(turnMode);
         const contextBundle = options?.skipContextBundle

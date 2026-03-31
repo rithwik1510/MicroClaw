@@ -10,6 +10,7 @@ export type ContextSourceKind =
   | 'memory'
   | 'daily'
   | 'retrieved_memory'
+  | 'lessons'
   | 'legacy_claude';
 
 export type ContextTrimMode = 'tail' | 'head' | 'drop';

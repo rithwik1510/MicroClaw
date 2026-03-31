@@ -45,7 +45,17 @@
       "Bash(taskkill /PID 2816 /F)",
       "Bash(taskkill /PID 27412 /F)",
       "Bash(cmd //c \"taskkill /PID 2816 /F\")",
-      "Bash(grep -n \"buildContextPrompt\\\\|getContextLines\" container/agent-runner/src/runtime/*.ts)"
+      "Bash(grep -n \"buildContextPrompt\\\\|getContextLines\" container/agent-runner/src/runtime/*.ts)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:zylos.ai)",
+      "WebFetch(domain:www.marktechpost.com)",
+      "WebFetch(domain:vellum.ai)",
+      "WebFetch(domain:gurusup.com)",
+      "WebFetch(domain:evoailabs.medium.com)",
+      "WebFetch(domain:stevekinney.com)",
+      "Bash(xargs grep:*)",
+      "Bash(find /c/Users/posan/OneDrive/Desktop/RIA BOT/nanoclaw -type f \\\\\\(-name *feature* -o -name *README* -o -name *HEARTBEAT* \\\\\\))",
+      "Bash(xargs wc:*)"
     ]
   }
 }

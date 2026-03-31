@@ -14,14 +14,54 @@ export function chatsRouter(core: AppCore): Router {
     res.json(chats);
   });
 
+  // List groups for the dashboard sidebar — deduplicated by folder
+  router.get('/chats/groups', (_req, res) => {
+    const groups = core.getRegisteredGroups();
+    const seen = new Set<string>();
+    const list: Array<{ jid: string; name: string; folder: string; isMain: boolean }> = [];
+
+    for (const [jid, group] of Object.entries(groups)) {
+      // Skip if we already have this folder (prefer non-dashboard JIDs)
+      if (seen.has(group.folder)) continue;
+      seen.add(group.folder);
+
+      // Skip empty/orphan dashboard groups with no real data
+      if (jid.startsWith('dashboard:') && !Object.values(groups).some(
+        g => !g.folder.startsWith('dashboard_') || g.folder === group.folder,
+      )) continue;
+
+      list.push({
+        jid,
+        name: group.name,
+        folder: group.folder,
+        isMain: group.isMain || false,
+      });
+    }
+
+    res.json(list);
+  });
+
   router.post('/chats', (req, res) => {
-    const { name } = req.body;
+    const { name, existingFolder } = req.body;
     if (!name) {
       res.status(400).json({ error: 'name is required' });
       return;
     }
+
+    const folder = existingFolder || `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`;
+
+    // Reuse existing dashboard JID for this folder
+    const groups = core.getRegisteredGroups();
+    const existingJid = Object.keys(groups).find(
+      jid => jid.startsWith('dashboard:') && groups[jid].folder === folder,
+    );
+
+    if (existingJid) {
+      res.status(200).json({ jid: existingJid, name, folder });
+      return;
+    }
+
     const jid = `dashboard:${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
-    const folder = `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`;
 
     core.registerGroup(jid, {
       name,
@@ -36,8 +76,22 @@ export function chatsRouter(core: AppCore): Router {
 
   router.get('/chats/:jid/messages', (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50;
-    const messages = getRecentMessages(req.params.jid, limit);
-    res.json(messages);
+    const requestedJid = req.params.jid;
+
+    // Find all JIDs that share the same folder (e.g., discord JID + dashboard JID)
+    const groups = core.getRegisteredGroups();
+    const folder = groups[requestedJid]?.folder;
+    const relatedJids = folder
+      ? Object.keys(groups).filter(jid => groups[jid].folder === folder)
+      : [requestedJid];
+
+    // Merge messages from all related JIDs, sorted by timestamp
+    const allMessages = relatedJids
+      .flatMap(jid => getRecentMessages(jid, limit))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      .slice(-limit);
+
+    res.json(allMessages);
   });
 
   return router;

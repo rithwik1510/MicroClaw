@@ -1,12 +1,26 @@
 import { Router } from 'express';
-import { getSetupValue, setSetupValue } from '../../src/db.js';
+import { getSetupValue, setSetupValue, getAllRuntimeProfiles } from '../../src/db.js';
 
 export function setupRouter(): Router {
   const router = Router();
 
   router.get('/setup', (_req, res) => {
-    const completed = getSetupValue('onboarding_completed') === 'true';
-    res.json({ completed });
+    const explicitlyDone = getSetupValue('onboarding_completed') === 'true';
+
+    // Pull existing config from runtime profiles if available
+    const profiles = getAllRuntimeProfiles().filter(p => p.enabled);
+    const primary = profiles[0];
+
+    res.json({
+      completed: explicitlyDone,
+      existing: primary
+        ? {
+            provider: primary.provider,
+            model: primary.model,
+            baseUrl: primary.baseUrl || '',
+          }
+        : null,
+    });
   });
 
   router.post('/setup', (req, res) => {

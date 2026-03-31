@@ -8,6 +8,7 @@ import {
   getAllTasks,
   getDueTasks,
   getTaskById,
+  insertLesson,
   logRuntimeEvent,
   logRuntimeUsage,
   logTaskRun,
@@ -25,6 +26,7 @@ import { resolveCapabilityRoute } from './runtime/capability-router.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 import { runAgentProcess } from './execution/backend.js';
 import { buildRuntimeUsageLog } from './runtime-usage.js';
+import { getActivityBroadcast } from '../server/ws.js';
 
 /**
  * Compute the next run time for a recurring task, anchored to the
@@ -104,6 +106,20 @@ async function runTask(
       result: null,
       error,
     });
+    try {
+      getActivityBroadcast()({
+        id: String(Date.now()),
+        type: 'task',
+        groupFolder: task.group_folder,
+        timestamp: new Date().toISOString(),
+        status: 'error',
+        summary: task.prompt?.slice(0, 120) || 'Scheduled task',
+        durationMs: Date.now() - startTime,
+        detail: error || undefined,
+      });
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
   fs.mkdirSync(groupDir, { recursive: true });
@@ -131,6 +147,20 @@ async function runTask(
       result: null,
       error: `Group not found: ${task.group_folder}`,
     });
+    try {
+      getActivityBroadcast()({
+        id: String(Date.now()),
+        type: 'task',
+        groupFolder: task.group_folder,
+        timestamp: new Date().toISOString(),
+        status: 'error',
+        summary: task.prompt?.slice(0, 120) || 'Scheduled task',
+        durationMs: Date.now() - startTime,
+        detail: `Group not found: ${task.group_folder}`,
+      });
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
 
@@ -394,6 +424,40 @@ async function runTask(
     result,
     error,
   });
+  try {
+    getActivityBroadcast()({
+      id: String(Date.now()),
+      type: 'task',
+      groupFolder: task.group_folder,
+      timestamp: new Date().toISOString(),
+      status: error ? 'error' : 'success',
+      summary: task.prompt?.slice(0, 120) || 'Scheduled task',
+      durationMs,
+      detail: error || result || undefined,
+    });
+  } catch {
+    /* broadcast is best-effort */
+  }
+  if (error) {
+    try {
+      const taskPrompt = task.prompt || '';
+      insertLesson({
+        groupFolder: task.group_folder,
+        createdAt: new Date().toISOString(),
+        triggerType: 'task',
+        triggerId: task.id,
+        errorSummary: error.slice(0, 200),
+        lessonText: `Task "${taskPrompt.slice(0, 80)}" failed: ${error.slice(0, 300)}. Review task configuration and error context.`,
+        keywords: taskPrompt
+          .split(/\s+/)
+          .filter((w: string) => w.length > 4)
+          .slice(0, 5)
+          .join(','),
+      });
+    } catch {
+      /* lesson extraction is non-critical */
+    }
+  }
 
   const nextRun = computeNextRun(task);
   const resultSummary = error

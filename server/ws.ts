@@ -2,8 +2,15 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import type { AppCore } from '../src/core.js';
 import type { DashboardChannel } from '../src/channels/dashboard.js';
-import { storeMessageDirect } from '../src/db.js';
+import { storeMessageDirect, storeChatMetadata } from '../src/db.js';
 import { logger } from '../src/logger.js';
+
+type BroadcastFn = (event: any) => void;
+let activityBroadcast: BroadcastFn = () => {};
+
+export function getActivityBroadcast(): BroadcastFn {
+  return activityBroadcast;
+}
 
 interface WsMessage {
   type: 'message' | 'subscribe' | 'unsubscribe';
@@ -14,6 +21,15 @@ interface WsMessage {
 export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChannel: DashboardChannel): void {
   const wss = new WebSocketServer({ noServer: true });
   const subscriptions = new Map<WebSocket, Set<string>>();
+
+  activityBroadcast = (event: any) => {
+    const message = JSON.stringify({ type: 'activity', entry: event });
+    for (const [ws] of subscriptions) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+      }
+    }
+  };
 
   // Wire dashboard channel's send function to broadcast to subscribed WS clients
   dashboardChannel.setSendFn((jid: string, text: string) => {
@@ -53,6 +69,7 @@ export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChann
           case 'subscribe':
             if (data.chatJid) {
               subscriptions.get(ws)!.add(data.chatJid);
+              logger.debug({ chatJid: data.chatJid }, 'WS client subscribed');
             }
             break;
 
@@ -64,22 +81,26 @@ export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChann
 
           case 'message':
             if (data.chatJid && data.content) {
-              // Store the user message
+              const timestamp = new Date().toISOString();
+
+              // Ensure chat metadata exists (required for message storage)
+              storeChatMetadata(data.chatJid, timestamp, undefined, 'dashboard', false);
+
+              // Store the user message once
               storeMessageDirect({
                 id: `dash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 chat_jid: data.chatJid,
                 sender: 'user',
                 sender_name: 'User',
                 content: data.content,
-                timestamp: new Date().toISOString(),
+                timestamp,
                 is_from_me: true,
               });
 
-              // Route through the dashboard channel -> AppCore pipeline
-              dashboardChannel.handleIncomingMessage(data.chatJid, data.content);
-
-              // Enqueue for processing
+              // Enqueue for processing — this triggers processGroupMessages
               core.queue.enqueueMessageCheck(data.chatJid);
+
+              logger.info({ chatJid: data.chatJid, contentLen: data.content.length }, 'Dashboard message received');
 
               // Broadcast status: thinking
               const statusMsg = JSON.stringify({

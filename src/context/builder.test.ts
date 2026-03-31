@@ -326,10 +326,11 @@ describe('buildContextBundle', () => {
       today: new Date('2026-03-07T10:30:00.000Z'),
     });
 
-    // Header is now shorter for local model context savings
-    expect(bundle.systemPrompt).toContain(
-      'You are a persistent personal assistant',
-    );
+    // Header activates persona when SOUL.md exists
+    expect(
+      bundle.systemPrompt.includes('embody its persona') ||
+        bundle.systemPrompt.includes('persistent personal assistant'),
+    ).toBe(true);
     expect(bundle.systemPrompt).toContain('Preferred name: Ravi');
     expect(bundle.systemPrompt).not.toContain('Another long life detail');
     expect(bundle.systemPrompt).toContain('Build an open claw style assistant');

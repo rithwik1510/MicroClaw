@@ -4,6 +4,8 @@ import path from 'path';
 import { GROUPS_DIR } from '../config.js';
 import {
   getPinnedMemoryEntries,
+  incrementLessonInjections,
+  queryLessonsByKeywords,
   queryMemoryExact,
   queryMemoryFts,
 } from '../db.js';
@@ -14,6 +16,7 @@ import {
   CONTEXT_MAX_DAILY_EXCERPTS,
   CONTEXT_MAX_DAILY_EXCERPT_CHARS,
   CONTEXT_MAX_IDENTITY_CHARS,
+  CONTEXT_MAX_LESSONS_CHARS,
   CONTEXT_MAX_MOPUS_CHARS,
   CONTEXT_MAX_MEMORY_CHARS,
   CONTEXT_MAX_RETRIEVED_MEMORY_CHARS,
@@ -445,6 +448,8 @@ function kindHeading(kind: ContextSourceKind, label: string): string {
       return `## ${label}\nThese are recent daily notes relevant to the current turn.`;
     case 'retrieved_memory':
       return `## ${label}\nMemory snippets retrieved for this conversation.`;
+    case 'lessons':
+      return `## ${label}\nPast failure learnings relevant to this conversation.`;
     case 'legacy_claude':
       return `## ${label}\nLegacy compatibility notes kept at lowest priority.`;
   }
@@ -929,8 +934,10 @@ function joinLayers(layers: ContextLayer[]): string {
     .filter((layer) => layer.included && layer.content.trim())
     .map((layer) => layer.content.trim());
   if (included.length === 0) return '';
-  const header =
-    'You are a persistent personal assistant. Use project context below as guidance. Prioritize the current request. Do not fabricate facts.';
+  const hasSoul = layers.some((l) => l.kind === 'soul' && l.included);
+  const header = hasSoul
+    ? 'The following project context files define who you are and how you operate. If SOUL.md is present, fully embody its persona and tone — avoid stiff, generic, or robotic replies. Prioritize the current request. Do not fabricate facts.'
+    : 'You are a persistent personal assistant. Use project context below as guidance. Prioritize the current request. Do not fabricate facts.';
   return [header, ...included].join('\n\n');
 }
 
@@ -1067,6 +1074,86 @@ function enforceFinalPromptHardCap(
   return warnings;
 }
 
+function buildLessonsLayer(
+  groupFolder: string,
+  strongKeywords: string[],
+): ContextLayer {
+  if (strongKeywords.length === 0) {
+    return {
+      kind: 'lessons',
+      scope: 'group',
+      label: 'Lessons from past failures',
+      filePath: '',
+      included: false,
+      inclusionReason: 'no_strong_keywords',
+      trimMode: 'tail',
+      rawChars: 0,
+      trimmedChars: 0,
+      content: '',
+    };
+  }
+
+  let lessons: Array<{ id: number; createdAt: string; lessonText: string }>;
+  try {
+    lessons = queryLessonsByKeywords(groupFolder, strongKeywords, 5);
+  } catch {
+    return {
+      kind: 'lessons',
+      scope: 'group',
+      label: 'Lessons from past failures',
+      filePath: '',
+      included: false,
+      inclusionReason: 'query_failed',
+      trimMode: 'tail',
+      rawChars: 0,
+      trimmedChars: 0,
+      content: '',
+    };
+  }
+
+  if (lessons.length === 0) {
+    return {
+      kind: 'lessons',
+      scope: 'group',
+      label: 'Lessons from past failures',
+      filePath: '',
+      included: false,
+      inclusionReason: 'no_matching_lessons',
+      trimMode: 'tail',
+      rawChars: 0,
+      trimmedChars: 0,
+      content: '',
+    };
+  }
+
+  try {
+    incrementLessonInjections(lessons.map((l) => l.id));
+  } catch {
+    /* non-critical */
+  }
+
+  const lines = lessons.map(
+    (l) => `- [${l.createdAt.slice(0, 10)}] ${l.lessonText}`,
+  );
+  let content = `## Relevant Lessons\n${lines.join('\n')}`;
+  if (content.length > CONTEXT_MAX_LESSONS_CHARS) {
+    content = content.slice(0, CONTEXT_MAX_LESSONS_CHARS);
+  }
+
+  return {
+    kind: 'lessons',
+    scope: 'group',
+    label: 'Lessons from past failures',
+    filePath: '',
+    included: true,
+    inclusionReason: `${lessons.length}_lessons_matched`,
+    trimMode: 'tail',
+    rawChars: content.length,
+    trimmedChars: content.length,
+    content,
+  };
+}
+
 export function buildContextBundle(
   input: BuildContextBundleInput,
 ): ContextBundle {
@@ -1166,6 +1253,7 @@ export function buildContextBundle(
     }))
     .filter((entry) => isUsefulRetrievedMemory(entry.kind, entry.content));
   layers.push(buildRetrievedMemoryLayer(pinnedEntries, retrievedEntries));
+  layers.push(buildLessonsLayer(input.groupFolder, strongKeywords));
 
   for (const layer of layers) {
     if (
