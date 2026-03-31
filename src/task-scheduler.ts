@@ -117,7 +117,9 @@ async function runTask(
         durationMs: Date.now() - startTime,
         detail: error || undefined,
       });
-    } catch { /* broadcast is best-effort */ }
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
   fs.mkdirSync(groupDir, { recursive: true });
@@ -156,7 +158,9 @@ async function runTask(
         durationMs: Date.now() - startTime,
         detail: `Group not found: ${task.group_folder}`,
       });
-    } catch { /* broadcast is best-effort */ }
+    } catch {
+      /* broadcast is best-effort */
+    }
     return;
   }
 
@@ -431,7 +435,9 @@ async function runTask(
       durationMs,
       detail: error || result || undefined,
     });
-  } catch { /* broadcast is best-effort */ }
+  } catch {
+    /* broadcast is best-effort */
+  }
   if (error) {
     try {
       const taskPrompt = task.prompt || '';

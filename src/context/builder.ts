@@ -1127,11 +1127,13 @@ function buildLessonsLayer(
   }
 
   try {
-    incrementLessonInjections(lessons.map(l => l.id));
-  } catch { /* non-critical */ }
+    incrementLessonInjections(lessons.map((l) => l.id));
+  } catch {
+    /* non-critical */
+  }
 
   const lines = lessons.map(
-    l => `- [${l.createdAt.slice(0, 10)}] ${l.lessonText}`,
+    (l) => `- [${l.createdAt.slice(0, 10)}] ${l.lessonText}`,
   );
   let content = `## Relevant Lessons\n${lines.join('\n')}`;
   if (content.length > CONTEXT_MAX_LESSONS_CHARS) {
