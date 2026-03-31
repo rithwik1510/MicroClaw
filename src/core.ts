@@ -71,7 +71,7 @@ import {
 } from './context/memory.js';
 import { insertMemoryEntry } from './db.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import { startHeartbeatLoop } from './heartbeat.js';
+import { loadHeartbeatChecklist, runHeartbeat, startHeartbeatLoop } from './heartbeat.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -257,6 +257,39 @@ export class AppCore {
         lastActivity: c.last_message_time,
         isRegistered: registeredJids.has(c.jid),
       }));
+  }
+
+  /**
+   * Manually trigger a heartbeat run for a specific group JID.
+   * Enqueues as a background task if the group exists and has a heartbeat checklist.
+   */
+  triggerHeartbeat(groupJid: string): boolean {
+    const group = this.registeredGroups[groupJid];
+    if (!group) return false;
+
+    const checklist = loadHeartbeatChecklist(group.folder);
+    if (!checklist) return false;
+
+    const deps = {
+      registeredGroups: () => this.registeredGroups,
+      queue: this.queue,
+      onProcess: (jid: string, proc: import('child_process').ChildProcess, containerName: string, groupFolder: string) =>
+        this.queue.registerProcess(jid, proc, containerName, groupFolder),
+      sendMessage: async (jid: string, rawText: string) => {
+        const channel = findChannel(this.channels, jid);
+        if (!channel) return;
+        const text = formatOutbound(rawText);
+        if (text) await channel.sendMessage(jid, text);
+      },
+    };
+
+    this.queue.enqueueTask(
+      groupJid,
+      `heartbeat:${group.folder}:manual:${Date.now()}`,
+      () => runHeartbeat(groupJid, group, checklist, deps),
+      { lane: 'background' },
+    );
+    return true;
   }
 
   /** @internal - exported for testing */
