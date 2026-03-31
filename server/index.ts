@@ -8,6 +8,7 @@ import { setupRouter } from './api/setup.js';
 import { agentsRouter } from './api/agents.js';
 import { chatsRouter } from './api/chats.js';
 import { personaRouter } from './api/persona.js';
+import { activityRouter } from './api/activity.js';
 import { errorHandler } from './middleware.js';
 import { DashboardChannel } from '../src/channels/dashboard.js';
 import { setupWebSocket } from './ws.js';
@@ -29,6 +30,7 @@ export function createApp(core: AppCore): {
   app.use('/api', agentsRouter());
   app.use('/api', chatsRouter(core));
   app.use('/api', personaRouter());
+  app.use('/api', activityRouter());
 
   // Serve static UI (pre-built React app)
   const uiDistPath = path.resolve(__dirname, '../ui/dist');
