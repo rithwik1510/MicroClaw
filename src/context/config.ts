@@ -55,3 +55,6 @@ export const CONTEXT_MAX_DAILY_EXCERPT_CHARS = 4_000;
 // FTS5 retrieval — additive layer on top of the always-on memory anchor
 export const CONTEXT_MAX_RETRIEVED_MEMORY_CHARS = 4_000;
 export const CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS = 20;
+
+// Lessons — injected when keywords match past failure learnings
+export const CONTEXT_MAX_LESSONS_CHARS = 2_000;
