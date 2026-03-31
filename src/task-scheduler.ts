@@ -8,6 +8,7 @@ import {
   getAllTasks,
   getDueTasks,
   getTaskById,
+  insertLesson,
   logRuntimeEvent,
   logRuntimeUsage,
   logTaskRun,
@@ -394,6 +395,20 @@ async function runTask(
     result,
     error,
   });
+  if (error) {
+    try {
+      const taskPrompt = task.prompt || '';
+      insertLesson({
+        groupFolder: task.group_folder,
+        createdAt: new Date().toISOString(),
+        triggerType: 'task',
+        triggerId: task.id,
+        errorSummary: error.slice(0, 200),
+        lessonText: `Task "${taskPrompt.slice(0, 80)}" failed: ${error.slice(0, 300)}. Review task configuration and error context.`,
+        keywords: taskPrompt.split(/\s+/).filter((w: string) => w.length > 4).slice(0, 5).join(','),
+      });
+    } catch { /* lesson extraction is non-critical */ }
+  }
 
   const nextRun = computeNextRun(task);
   const resultSummary = error

@@ -15,6 +15,7 @@ import {
   getRecentMessages,
   getRecentTaskFailuresForGroup,
   getTasksForGroup,
+  insertLesson,
   logRuntimeUsage,
   logHeartbeatRun,
 } from './db.js';
@@ -29,6 +30,7 @@ import { buildContextBundle } from './context/builder.js';
 import { ContainerOutput } from './container-runner.js';
 import { RegisteredGroup } from './types.js';
 import { buildRuntimeUsageLog } from './runtime-usage.js';
+import { getActivityBroadcast } from '../server/ws.js';
 
 const HEARTBEAT_OK_SENTINEL = 'HEARTBEAT_OK';
 const HEARTBEAT_CLOSE_DELAY_MS = 5000;
@@ -382,7 +384,33 @@ export async function runHeartbeat(
       actions_taken: null,
       error: lastError,
     });
+    // Extract a lesson from the failure
+    try {
+      insertLesson({
+        groupFolder: group.folder,
+        createdAt: new Date().toISOString(),
+        triggerType: 'heartbeat',
+        errorSummary: lastError.slice(0, 200),
+        lessonText: `Heartbeat failed: ${lastError.slice(0, 300)}. Check checklist items and ensure required services are reachable.`,
+        keywords: checklist.content
+          .split(/\s+/)
+          .filter((w: string) => w.length > 4)
+          .slice(0, 5)
+          .join(','),
+      });
+    } catch { /* lesson extraction is non-critical */ }
     logger.error({ group: group.folder, error: lastError }, 'Heartbeat failed');
+    try {
+      getActivityBroadcast()({
+        id: String(Date.now()),
+        type: 'heartbeat',
+        groupFolder: group.folder,
+        timestamp: new Date().toISOString(),
+        status: 'error',
+        summary: 'Silent check — all clear',
+        durationMs,
+      });
+    } catch { /* broadcast is best-effort */ }
     return;
   }
 
@@ -400,6 +428,17 @@ export async function runHeartbeat(
       actions_taken: null,
       error: null,
     });
+    try {
+      getActivityBroadcast()({
+        id: String(Date.now()),
+        type: 'heartbeat',
+        groupFolder: group.folder,
+        timestamp: new Date().toISOString(),
+        status: 'ok',
+        summary: 'Silent check — all clear',
+        durationMs,
+      });
+    } catch { /* broadcast is best-effort */ }
     return;
   }
 
@@ -418,6 +457,17 @@ export async function runHeartbeat(
       actions_taken: null,
       error: null,
     });
+    try {
+      getActivityBroadcast()({
+        id: String(Date.now()),
+        type: 'heartbeat',
+        groupFolder: group.folder,
+        timestamp: new Date().toISOString(),
+        status: 'ok',
+        summary: 'Silent check — all clear',
+        durationMs,
+      });
+    } catch { /* broadcast is best-effort */ }
     return;
   }
 
@@ -431,6 +481,17 @@ export async function runHeartbeat(
     actions_taken: sanitized,
     error: null,
   });
+  try {
+    getActivityBroadcast()({
+      id: String(Date.now()),
+      type: 'heartbeat',
+      groupFolder: group.folder,
+      timestamp: new Date().toISOString(),
+      status: 'acted',
+      summary: sanitized,
+      durationMs,
+    });
+  } catch { /* broadcast is best-effort */ }
 }
 
 export function startHeartbeatLoop(deps: HeartbeatDependencies): void {

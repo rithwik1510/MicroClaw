@@ -69,9 +69,14 @@ import {
   appendDailyMemoryNotes,
   extractMemoryCandidates,
 } from './context/memory.js';
-import { insertMemoryEntry } from './db.js';
+import { insertMemoryEntry, insertRoutineSignal } from './db.js';
+import { createHash } from 'crypto';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
-import { loadHeartbeatChecklist, runHeartbeat, startHeartbeatLoop } from './heartbeat.js';
+import {
+  loadHeartbeatChecklist,
+  runHeartbeat,
+  startHeartbeatLoop,
+} from './heartbeat.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -273,8 +278,12 @@ export class AppCore {
     const deps = {
       registeredGroups: () => this.registeredGroups,
       queue: this.queue,
-      onProcess: (jid: string, proc: import('child_process').ChildProcess, containerName: string, groupFolder: string) =>
-        this.queue.registerProcess(jid, proc, containerName, groupFolder),
+      onProcess: (
+        jid: string,
+        proc: import('child_process').ChildProcess,
+        containerName: string,
+        groupFolder: string,
+      ) => this.queue.registerProcess(jid, proc, containerName, groupFolder),
       sendMessage: async (jid: string, rawText: string) => {
         const channel = findChannel(this.channels, jid);
         if (!channel) return;
@@ -1570,6 +1579,33 @@ export class AppCore {
           prompt,
           toolPolicy: resolved.runtimeConfig.toolPolicy,
         });
+
+        // Collect routine signal for pattern detection
+        try {
+          const now = new Date();
+          const signalKeywords = prompt
+            .split(/\s+/)
+            .filter((w: string) => w.length > 4 && /^[a-zA-Z]+$/.test(w))
+            .slice(0, 3)
+            .join(',');
+          if (signalKeywords.length > 0) {
+            insertRoutineSignal({
+              groupFolder: group.folder,
+              timestamp: now.toISOString(),
+              hourBucket: now.getHours(),
+              dayOfWeek: now.getDay(),
+              capability: capabilityRoute,
+              intentKeywords: signalKeywords,
+              messageHash: createHash('md5')
+                .update(prompt.slice(0, 200))
+                .digest('hex')
+                .slice(0, 8),
+            });
+          }
+        } catch {
+          /* signal collection is non-critical */
+        }
+
         const turnMode = this.resolveContextTurnMode(prompt, capabilityRoute);
         const contextBudget = this.contextToolBudgetForTurnMode(turnMode);
         const contextBundle = options?.skipContextBundle
