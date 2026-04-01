@@ -3394,8 +3394,17 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         }
       }
 
+      // Filter prior messages for non-tool-loop turns: strip tool-result messages
+      // and assistant messages that contain tool_calls. These are left over from
+      // previous tool-loop turns (e.g. host-file operations) and cause local models
+      // to hallucinate JSON tool call text on plain conversational turns.
       const priorNonSystemMessages = (req.priorMessages || [])
-        .filter((m) => m.role !== 'system');
+        .filter((m) => {
+          if (m.role === 'system') return false;
+          if (m.role === 'tool') return false;
+          if (m.role === 'assistant' && (m as unknown as Record<string, unknown>).tool_calls) return false;
+          return true;
+        });
       const chatRequestBody = {
         model,
         messages: [

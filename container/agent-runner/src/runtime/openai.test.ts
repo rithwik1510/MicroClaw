@@ -683,7 +683,7 @@ describe('OpenAIRuntimeAdapter', () => {
     const retryMessage = retryPayload.messages[retryPayload.messages.length - 1];
     expect(retryPayload.tool_choice).toBe('required');
     expect(retryMessage?.content).toContain(
-      'This is still a host-file turn. Use the native host-file tools now.',
+      'This is still a host-file turn. Use a host-file action tool now',
     );
     expect(mockPostJson).toHaveBeenCalledTimes(3);
     expect(typeof res.result).toBe('string');
