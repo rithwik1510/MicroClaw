@@ -4,7 +4,6 @@ import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import type { AppCore } from '../src/core.js';
 import { healthRouter } from './api/health.js';
-import { setupRouter } from './api/setup.js';
 import { errorHandler } from './middleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -15,7 +14,6 @@ export function createApp(core: AppCore): { app: express.Express; httpServer: Re
 
   // API routes
   app.use('/api', healthRouter(core));
-  app.use('/api', setupRouter());
 
   // Serve static UI (pre-built React app)
   const uiDistPath = path.resolve(__dirname, '../ui/dist');
