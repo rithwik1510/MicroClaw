@@ -1266,31 +1266,20 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
 
     if (input.route === 'host_file_operation') {
-      if (!input.sawToolCalls && this.hostFileNeedsDirectoryDiscovery(input.prompt)) {
-        // First iteration: give all host-file tools for discovery + action.
-        const allHostFileTools = input.baseRegistry.filter(
-          (tool) => tool.family === 'host_files' || tool.family === 'memory',
-        );
-        return {
-          registry: allHostFileTools,
-          tools: toOpenAITools(allHostFileTools),
-        };
-      }
-      if (input.sawToolCalls) {
-        // After first tool call: remove discovery-only tools so the model is
-        // forced to call an action tool (read, write, move, etc.) instead of
-        // calling list_host_directories again.
-        const actionTools = input.baseRegistry.filter(
-          (tool) =>
-            (tool.family === 'host_files' &&
-              tool.name !== 'list_host_directories') ||
-            tool.family === 'memory',
-        );
-        return {
-          registry: actionTools,
-          tools: toOpenAITools(actionTools),
-        };
-      }
+      // Always exclude list_host_directories from the tool list.
+      // Directory info is auto-injected before the tool loop starts
+      // (see hostFileBootstrap). This prevents local models from calling
+      // list_host_directories repeatedly instead of action tools.
+      const actionTools = input.baseRegistry.filter(
+        (tool) =>
+          (tool.family === 'host_files' &&
+            tool.name !== 'list_host_directories') ||
+          tool.family === 'memory',
+      );
+      return {
+        registry: actionTools,
+        tools: toOpenAITools(actionTools),
+      };
     }
 
     const plannerTools = this.plannerToolsForTurn(
@@ -2718,6 +2707,32 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         role: 'user',
         content: fittedPrompts.userPrompt,
       });
+
+      // Host-file bootstrap: auto-call list_host_directories and inject the
+      // result so the model already knows available directories. This prevents
+      // the model from wasting iterations calling list_host_directories itself.
+      if (route === 'host_file_operation') {
+        const dirTool = findTool(baseRegistry, 'list_host_directories');
+        if (dirTool) {
+          const dirResult = await dirTool.execute({}, toolCtx);
+          const bootstrapId = `bootstrap-hostdirs-${Date.now()}`;
+          messages.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              id: bootstrapId,
+              type: 'function',
+              function: { name: 'list_host_directories', arguments: '{}' },
+            }],
+          });
+          messages.push({
+            role: 'tool',
+            tool_call_id: bootstrapId,
+            content: JSON.stringify(dirResult),
+          });
+          console.error(`[openai-runtime] host-file bootstrap: injected list_host_directories result (${dirResult.content.length} chars)`);
+        }
+      }
 
       let sawToolCalls = false;
       let lastAssistantContent = '';
