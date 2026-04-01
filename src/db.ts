@@ -460,6 +460,20 @@ function createSchema(database: Database.Database): void {
   } catch {
     /* trigger already exists */
   }
+
+  // Dashboard source tracking
+  const msgCols = database.pragma('table_info(messages)') as Array<{ name: string }>;
+  if (!msgCols.some(c => c.name === 'source')) {
+    database.exec(`ALTER TABLE messages ADD COLUMN source TEXT DEFAULT 'legacy'`);
+  }
+  if (!msgCols.some(c => c.name === 'thread_id')) {
+    database.exec(`ALTER TABLE messages ADD COLUMN thread_id TEXT`);
+  }
+
+  const chatCols = database.pragma('table_info(chats)') as Array<{ name: string }>;
+  if (!chatCols.some(c => c.name === 'source')) {
+    database.exec(`ALTER TABLE chats ADD COLUMN source TEXT DEFAULT 'legacy'`);
+  }
 }
 
 export function initDatabase(): void {
@@ -560,6 +574,11 @@ export function initDatabase(): void {
 export function _initTestDatabase(): void {
   db = new Database(':memory:');
   createSchema(db);
+}
+
+/** Returns the active database instance. For use in tests only. */
+export function _getTestDb(): Database.Database {
+  return db;
 }
 
 /**

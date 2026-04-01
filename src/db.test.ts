@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  _getTestDb,
   acquireAuthRefreshLock,
   getPinnedMemoryEntries,
   insertMemoryEntry,
@@ -1071,5 +1072,25 @@ describe('getPinnedMemoryEntries', () => {
       pinned: true,
     });
     expect(getPinnedMemoryEntries('group_b')).toHaveLength(0);
+  });
+});
+
+describe('schema migrations', () => {
+  it('messages table has source column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(messages)') as Array<{ name: string }>;
+    expect(info.some(col => col.name === 'source')).toBe(true);
+  });
+
+  it('chats table has source column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(chats)') as Array<{ name: string }>;
+    expect(info.some(col => col.name === 'source')).toBe(true);
+  });
+
+  it('messages table has thread_id column', () => {
+    const db = _getTestDb();
+    const info = db.pragma('table_info(messages)') as Array<{ name: string }>;
+    expect(info.some(col => col.name === 'thread_id')).toBe(true);
   });
 });
