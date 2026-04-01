@@ -74,6 +74,34 @@ systemctl --user restart nanoclaw
 
 **WhatsApp not connecting after upgrade:** WhatsApp is now a separate skill, not bundled in core. Run `/add-whatsapp` (or `npx tsx scripts/apply-skill.ts .claude/skills/add-whatsapp && npm run build`) to install it. Existing auth credentials and groups are preserved.
 
+## Tool Design for Local Models — Hard-Learned Lessons
+
+These rules come from real failures. Do not skip them.
+
+### Use `exec` over custom tools for filesystem operations
+
+Local models (7-13B) cannot reliably do multi-step custom tool calling. They call the same discovery tool in a loop, ignore `tool_choice=required`, and hallucinate success. OpenClaw's approach is correct: use `read` + `write` + `edit` + `exec` with path guards. Models already know `mv`, `cp`, `mkdir`, `ls`, `find`, `grep`. Use `exec_host_command` for file management — not 10 bespoke tools that require multi-step orchestration.
+
+### Never build multi-step tool chains for local models
+
+If a task requires: discover → list → act, it will fail. Local models can do ONE tool call reliably. Design tools so one call completes the task. If discovery is needed, auto-inject it before the model sees the prompt (bootstrap pattern).
+
+### Always check the capability router with real message formats
+
+The router parses the current message from XML-wrapped continuity prompts. Test with `<message from="..." timestamp="...">actual user text</message>` format, not raw strings. Referential follow-ups like "move it" or "do it" need explicit patterns in the router — local models can't infer intent from context alone.
+
+### `fs.renameSync` fails on OneDrive (Windows)
+
+OneDrive-synced folders throw EPERM on `fs.renameSync`. Always use bash `mv` via `exec_host_command` or fall back to `cpSync` + `rmSync`. Never use bare `renameSync` without error handling.
+
+### Warm sessions poison subsequent turns
+
+When a tool-loop turn fails, prior messages (tool results, retry instructions, assistant tool_calls) stay in the warm session. On the next plain conversational turn, the model pattern-matches on this garbage and outputs raw JSON. Fix: strip `tool` role messages and assistant `tool_calls` from prior messages on non-tool-loop streaming turns.
+
+### Always build then restart
+
+The agent-runner runs from `container/agent-runner/dist/`. Source changes don't take effect until `cd container/agent-runner && npm run build`. The orchestrator (`src/`) uses tsx hot-reload but the agent-runner does NOT. After any agent-runner change: build, then restart `npm run dev`.
+
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
