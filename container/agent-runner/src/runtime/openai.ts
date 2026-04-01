@@ -1265,21 +1265,32 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       };
     }
 
-    if (
-      !input.sawToolCalls &&
-      input.route === 'host_file_operation' &&
-      this.hostFileNeedsDirectoryDiscovery(input.prompt)
-    ) {
-      // Give all host-file tools so the model can discover AND act in one turn.
-      // tool_choice='required' on the first iteration already nudges the model
-      // to call list_host_directories before action tools.
-      const allHostFileTools = input.baseRegistry.filter(
-        (tool) => tool.family === 'host_files' || tool.family === 'memory',
-      );
-      return {
-        registry: allHostFileTools,
-        tools: toOpenAITools(allHostFileTools),
-      };
+    if (input.route === 'host_file_operation') {
+      if (!input.sawToolCalls && this.hostFileNeedsDirectoryDiscovery(input.prompt)) {
+        // First iteration: give all host-file tools for discovery + action.
+        const allHostFileTools = input.baseRegistry.filter(
+          (tool) => tool.family === 'host_files' || tool.family === 'memory',
+        );
+        return {
+          registry: allHostFileTools,
+          tools: toOpenAITools(allHostFileTools),
+        };
+      }
+      if (input.sawToolCalls) {
+        // After first tool call: remove discovery-only tools so the model is
+        // forced to call an action tool (read, write, move, etc.) instead of
+        // calling list_host_directories again.
+        const actionTools = input.baseRegistry.filter(
+          (tool) =>
+            (tool.family === 'host_files' &&
+              tool.name !== 'list_host_directories') ||
+            tool.family === 'memory',
+        );
+        return {
+          registry: actionTools,
+          tools: toOpenAITools(actionTools),
+        };
+      }
     }
 
     const plannerTools = this.plannerToolsForTurn(
