@@ -41,17 +41,35 @@ function hasHostFileRequest(text: string): boolean {
   // Web signals that override weak file nouns
   const webSignal =
     /\b(latest|current|today|recent|news|online|web|internet|source|sources|website|uploaded|cloud)\b/i;
+  // Referential file actions: "move it", "rename it", "copy them", "do it" after file context
+  const referentialFileAction =
+    /\b(move|rename|copy|delete|remove|organize) (it|that|them|those|this|the folder|the file)\b/i;
 
+  // Referential action = user is referring to a prior file operation
+  if (referentialFileAction.test(text)) {
+    return true;
+  }
   // Strong noun + any action = definitely file
-  if (strongFileNouns.test(text) && (fileActions.test(text) || visibilityActions.test(text))) {
+  if (
+    strongFileNouns.test(text) &&
+    (fileActions.test(text) || visibilityActions.test(text))
+  ) {
     return true;
   }
   // Weak noun + file-specific action, only if no competing web signal
-  if (weakFileNouns.test(text) && fileActions.test(text) && !webSignal.test(text)) {
+  if (
+    weakFileNouns.test(text) &&
+    fileActions.test(text) &&
+    !webSignal.test(text)
+  ) {
     return true;
   }
   // Weak noun + visibility, only if no competing web signal
-  if (weakFileNouns.test(text) && visibilityActions.test(text) && !webSignal.test(text)) {
+  if (
+    weakFileNouns.test(text) &&
+    visibilityActions.test(text) &&
+    !webSignal.test(text)
+  ) {
     return true;
   }
   return false;

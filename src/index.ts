@@ -604,8 +604,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (
     continuityPlan.shouldPersistSummary &&
     (storedSummary?.summary !== continuityPlan.computedSummary ||
-      storedSummary?.sourceMessageCount !==
-        continuityPlan.sourceMessageCount ||
+      storedSummary?.sourceMessageCount !== continuityPlan.sourceMessageCount ||
       storedSummary?.lastMessageTimestamp !==
         continuityPlan.lastMessageTimestamp)
   ) {
