@@ -31,6 +31,7 @@ import {
 import {
   executeCopyHostPath,
   executeEditHostFile,
+  executeExecHostCommand,
   executeGlobHostFiles,
   executeGrepHostFiles,
   executeListHostDirectories,
@@ -414,6 +415,22 @@ export function buildToolRegistry(): ToolHandler[] {
         additionalProperties: false,
       },
       execute: executeCopyHostPath,
+    },
+    {
+      name: 'exec_host_command',
+      family: 'host_files',
+      description:
+        'Run a shell command inside an allowed host directory. Use this for file operations like mv, cp, mkdir, ls, find, grep, cat, etc. Requires "command" (the shell command) and "working_directory" (absolute path from list_host_directories). The command runs in bash.',
+      schema: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to run (e.g. "mv folder1 folder2/", "ls -la", "mkdir archive")' },
+          working_directory: { type: 'string', description: 'Absolute path to run the command in. Must be inside an allowed host directory.' },
+        },
+        required: ['command', 'working_directory'],
+        additionalProperties: false,
+      },
+      execute: executeExecHostCommand,
     },
     {
       name: 'remember_this',
