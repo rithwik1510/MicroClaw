@@ -5,10 +5,22 @@ export function setupRouter(): Router {
   const router = Router();
 
   router.get('/setup', (_req, res) => {
-    // Setup is complete if either: explicit onboarding done, OR runtime profiles already exist
     const explicitlyDone = getSetupValue('onboarding_completed') === 'true';
-    const hasProfiles = getAllRuntimeProfiles().some(p => p.enabled);
-    res.json({ completed: explicitlyDone || hasProfiles });
+
+    // Pull existing config from runtime profiles if available
+    const profiles = getAllRuntimeProfiles().filter(p => p.enabled);
+    const primary = profiles[0];
+
+    res.json({
+      completed: explicitlyDone,
+      existing: primary
+        ? {
+            provider: primary.provider,
+            model: primary.model,
+            baseUrl: primary.baseUrl || '',
+          }
+        : null,
+    });
   });
 
   router.post('/setup', (req, res) => {
