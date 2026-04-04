@@ -20,8 +20,21 @@ export function chatsRouter(core: AppCore): Router {
       res.status(400).json({ error: 'name is required' });
       return;
     }
-    const jid = `dashboard:${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
+
     const folder = `dashboard_${name.toLowerCase().replace(/\s+/g, '_')}`;
+
+    // Reuse existing chat if one exists for this folder
+    const groups = core.getRegisteredGroups();
+    const existingJid = Object.keys(groups).find(
+      jid => jid.startsWith('dashboard:') && groups[jid].folder === folder,
+    );
+
+    if (existingJid) {
+      res.status(200).json({ jid: existingJid, name, folder });
+      return;
+    }
+
+    const jid = `dashboard:${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`;
 
     core.registerGroup(jid, {
       name,

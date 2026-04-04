@@ -922,13 +922,21 @@ export class AppCore {
   private async processGroupMessages(chatJid: string): Promise<boolean> {
     const processingStartedAt = Date.now();
     const group = this.registeredGroups[chatJid];
-    if (!group) return true;
+    if (!group) {
+      logger.warn({ chatJid }, 'processGroupMessages: no registered group');
+      return true;
+    }
 
     const channel = findChannel(this.channels, chatJid);
     if (!channel) {
       logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
       return true;
     }
+
+    logger.info(
+      { chatJid, group: group.name, channel: channel.name, folder: group.folder },
+      'processGroupMessages: starting',
+    );
 
     const isMainGroup = group.isMain === true;
 
