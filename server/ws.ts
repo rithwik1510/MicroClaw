@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
 import type { AppCore } from '../src/core.js';
 import type { DashboardChannel } from '../src/channels/dashboard.js';
-import { storeMessageDirect } from '../src/db.js';
+import { storeMessageDirect, storeChatMetadata } from '../src/db.js';
 import { logger } from '../src/logger.js';
 
 interface WsMessage {
@@ -53,6 +53,7 @@ export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChann
           case 'subscribe':
             if (data.chatJid) {
               subscriptions.get(ws)!.add(data.chatJid);
+              logger.debug({ chatJid: data.chatJid }, 'WS client subscribed');
             }
             break;
 
@@ -64,22 +65,26 @@ export function setupWebSocket(httpServer: Server, core: AppCore, dashboardChann
 
           case 'message':
             if (data.chatJid && data.content) {
-              // Store the user message
+              const timestamp = new Date().toISOString();
+
+              // Ensure chat metadata exists (required for message storage)
+              storeChatMetadata(data.chatJid, timestamp, undefined, 'dashboard', false);
+
+              // Store the user message once
               storeMessageDirect({
                 id: `dash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 chat_jid: data.chatJid,
                 sender: 'user',
                 sender_name: 'User',
                 content: data.content,
-                timestamp: new Date().toISOString(),
+                timestamp,
                 is_from_me: true,
               });
 
-              // Route through the dashboard channel -> AppCore pipeline
-              dashboardChannel.handleIncomingMessage(data.chatJid, data.content);
-
-              // Enqueue for processing
+              // Enqueue for processing — this triggers processGroupMessages
               core.queue.enqueueMessageCheck(data.chatJid);
+
+              logger.info({ chatJid: data.chatJid, contentLen: data.content.length }, 'Dashboard message received');
 
               // Broadcast status: thinking
               const statusMsg = JSON.stringify({
