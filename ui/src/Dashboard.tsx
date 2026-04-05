@@ -18,9 +18,14 @@ export function Dashboard() {
   const [isThinking, setIsThinking] = useState(false);
   const [defaultModel, setDefaultModel] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
   // Load agents and default model on mount
   useEffect(() => {
@@ -74,6 +79,19 @@ export function Dashboard() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chats, activeAgentId, isThinking]);
+
+  // Close attach menu when clicking outside
+  useEffect(() => {
+    if (!showAttachMenu) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.attach-menu') && !target.closest('.chat-input-attach')) {
+        setShowAttachMenu(false);
+      }
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [showAttachMenu]);
 
   // Auto-resize textarea
   const handleTextareaInput = useCallback(() => {
@@ -284,10 +302,112 @@ export function Dashboard() {
             </div>
 
             <div className="chat-input-wrapper">
+              {/* Attached files preview */}
+              {attachedFiles.length > 0 && (
+                <div className="attached-files">
+                  {attachedFiles.map((file, i) => (
+                    <div key={i} className="attached-file">
+                      <span className="attached-file-icon">
+                        {file.type.startsWith('image/') ? '🖼' : '📄'}
+                      </span>
+                      <span className="attached-file-name">{file.name}</span>
+                      <button
+                        className="attached-file-remove"
+                        onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="chat-input-box">
-                <button className="chat-input-attach" title="Attach file">
-                  +
-                </button>
+                <div style={{ position: 'relative' }}>
+                  <button
+                    className="chat-input-attach"
+                    title="Attach"
+                    onClick={() => setShowAttachMenu(prev => !prev)}
+                  >
+                    +
+                  </button>
+
+                  <AnimatePresence>
+                    {showAttachMenu && (
+                      <motion.div
+                        className="attach-menu"
+                        initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                        transition={{ duration: 0.15 }}
+                      >
+                        <button
+                          className="attach-menu-item"
+                          onClick={() => {
+                            imageInputRef.current?.click();
+                            setShowAttachMenu(false);
+                          }}
+                        >
+                          <span className="attach-menu-icon">🖼</span>
+                          Photo & Video
+                        </button>
+                        <button
+                          className="attach-menu-item"
+                          onClick={() => {
+                            cameraInputRef.current?.click();
+                            setShowAttachMenu(false);
+                          }}
+                        >
+                          <span className="attach-menu-icon">📷</span>
+                          Camera
+                        </button>
+                        <button
+                          className="attach-menu-item"
+                          onClick={() => {
+                            fileInputRef.current?.click();
+                            setShowAttachMenu(false);
+                          }}
+                        >
+                          <span className="attach-menu-icon">📄</span>
+                          Document
+                        </button>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  {/* Hidden file inputs */}
+                  <input
+                    ref={imageInputRef}
+                    type="file"
+                    accept="image/*,video/*"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      if (e.target.files) setAttachedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                      e.target.value = '';
+                    }}
+                  />
+                  <input
+                    ref={cameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      if (e.target.files) setAttachedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                      e.target.value = '';
+                    }}
+                  />
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={e => {
+                      if (e.target.files) setAttachedFiles(prev => [...prev, ...Array.from(e.target.files!)]);
+                      e.target.value = '';
+                    }}
+                  />
+                </div>
                 <textarea
                   ref={textareaRef}
                   rows={1}

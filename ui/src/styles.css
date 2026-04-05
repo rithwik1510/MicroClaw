@@ -699,6 +699,94 @@ body {
   font-family: var(--font-body);
 }
 
+/* Attach menu popup */
+.attach-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 40px var(--accent-glow-subtle);
+  z-index: 50;
+}
+
+.attach-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 0.87rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+}
+
+.attach-menu-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.attach-menu-icon {
+  font-size: 1.1rem;
+  width: 24px;
+  text-align: center;
+}
+
+/* Attached file preview chips */
+.attached-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 0 8px;
+}
+
+.attached-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.attached-file-icon {
+  font-size: 0.9rem;
+}
+
+.attached-file-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attached-file-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+
+.attached-file-remove:hover {
+  color: var(--accent);
+}
+
 /* ─── Create Agent Modal ─────────────────────── */
 
 .modal-overlay {
