@@ -280,6 +280,16 @@ export class AppCore {
     // Create group folder
     fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
 
+    // Initialize per-group CLAUDE.md if missing (dashboard groups need identity context)
+    const claudeMdPath = path.join(groupDir, 'CLAUDE.md');
+    if (!fs.existsSync(claudeMdPath)) {
+      const channelType = jid.startsWith('dashboard:') ? 'dashboard' : 'chat';
+      fs.writeFileSync(
+        claudeMdPath,
+        `# ${group.name}\n\nThis is a ${channelType} channel. Use standard Markdown formatting.\n\nRefer to global context (SOUL.md, STYLE.md, USER.md) for identity and preferences.\n`,
+      );
+    }
+
     // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
     this.ensureOneCLIAgent(jid, group);
 
@@ -934,7 +944,12 @@ export class AppCore {
     }
 
     logger.info(
-      { chatJid, group: group.name, channel: channel.name, folder: group.folder },
+      {
+        chatJid,
+        group: group.name,
+        channel: channel.name,
+        folder: group.folder,
+      },
       'processGroupMessages: starting',
     );
 
