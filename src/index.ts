@@ -18,7 +18,9 @@ async function main(): Promise<void> {
     core.stop();
   });
 
-  await core.start();
+  // Dashboard mode: skip process lock (local app, not a background service)
+  const isDashboardMode = !process.env.NANOCLAW_SERVICE_MODE;
+  await core.start({ skipProcessLock: isDashboardMode });
 
   // Graceful shutdown
   const shutdown = async (signal: string) => {
