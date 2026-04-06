@@ -94,11 +94,24 @@ export async function createAgent(data: {
   return res.json();
 }
 
-export async function createChat(name: string): Promise<{ jid: string; name: string; folder: string }> {
+export interface ExistingGroup {
+  jid: string;
+  name: string;
+  folder: string;
+  isMain: boolean;
+  requiresTrigger: boolean;
+}
+
+export async function getExistingGroups(): Promise<ExistingGroup[]> {
+  const res = await fetch(`${BASE}/chats/groups`);
+  return res.json();
+}
+
+export async function createChat(name: string, existingFolder?: string): Promise<{ jid: string; name: string; folder: string }> {
   const res = await fetch(`${BASE}/chats`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, existingFolder }),
   });
   return res.json();
 }
