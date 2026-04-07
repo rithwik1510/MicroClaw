@@ -3,7 +3,15 @@
  * isolation works correctly — heartbeat cannot see scheduling tools,
  * and scheduled tasks still can.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Mock web/providers.js to avoid transitive jsdom dependency
+// (jsdom is only installed in container/agent-runner/node_modules, not root)
+vi.mock('../container/agent-runner/src/tools/web/providers.js', () => ({
+  performSearch: vi.fn(async () => []),
+  performFetch: vi.fn(async () => ({ url: '', title: '', text: '' })),
+}));
+
 import {
   buildToolRegistry,
   filterToolRegistry,
