@@ -17,6 +17,16 @@ interface ActiveChat {
   messages: ChatMessage[];
 }
 
+// Map internal group names to friendly display names
+function friendlyName(name: string, folder: string): string {
+  // discord_dm → "Sam" (the user's personal assistant)
+  if (folder === 'discord_dm') return 'Sam';
+  // discord_main → clean up the server name
+  if (folder === 'discord_main') return name.replace(/#general/i, '').trim() || 'Main';
+  // Already has a good name
+  return name;
+}
+
 export function Dashboard() {
   const [sidebarItems, setSidebarItems] = useState<SidebarItem[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -38,12 +48,15 @@ export function Dashboard() {
   // Load existing groups and model on mount
   useEffect(() => {
     getExistingGroups().then(groups => {
-      const items: SidebarItem[] = groups.map(g => ({
-        id: g.folder,
-        name: g.name,
-        folder: g.folder,
-        source: g.jid.startsWith('dashboard:') ? 'dashboard' as const : 'existing' as const,
-      }));
+      const items: SidebarItem[] = groups
+        // Skip orphan dashboard-only groups (no real data)
+        .filter(g => !g.folder.startsWith('dashboard_'))
+        .map(g => ({
+          id: g.folder,
+          name: friendlyName(g.name, g.folder),
+          folder: g.folder,
+          source: g.jid.startsWith('dashboard:') ? 'dashboard' as const : 'existing' as const,
+        }));
       setSidebarItems(items);
     }).catch(() => {});
     getSetup().then(data => {
