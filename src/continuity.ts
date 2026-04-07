@@ -287,6 +287,19 @@ function normalizeContinuityMessages(
   };
 }
 
+const RECENT_BOT_MESSAGE_MAX_CHARS = 400;
+
+function capBotMessage(message: NewMessage, assistantName: string): NewMessage {
+  const isAssistant =
+    message.is_bot_message === true || message.sender_name === assistantName;
+  if (!isAssistant) return message;
+  if (message.content.length <= RECENT_BOT_MESSAGE_MAX_CHARS) return message;
+  return {
+    ...message,
+    content: trimStructuredText(message.content, RECENT_BOT_MESSAGE_MAX_CHARS),
+  };
+}
+
 function selectRecentMessages(
   messages: NewMessage[],
   maxTurns: number,
@@ -299,7 +312,7 @@ function selectRecentMessages(
   let selectedUserMessages = 0;
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
+    const message = capBotMessage(messages[index], assistantName);
     const nextChars = totalChars + normalizeLine(message.content).length;
     const isAssistant =
       message.is_bot_message === true || message.sender_name === assistantName;

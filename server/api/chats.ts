@@ -76,8 +76,22 @@ export function chatsRouter(core: AppCore): Router {
 
   router.get('/chats/:jid/messages', (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50;
-    const messages = getRecentMessages(req.params.jid, limit);
-    res.json(messages);
+    const requestedJid = req.params.jid;
+
+    // Find all JIDs that share the same folder (e.g., discord JID + dashboard JID)
+    const groups = core.getRegisteredGroups();
+    const folder = groups[requestedJid]?.folder;
+    const relatedJids = folder
+      ? Object.keys(groups).filter(jid => groups[jid].folder === folder)
+      : [requestedJid];
+
+    // Merge messages from all related JIDs, sorted by timestamp
+    const allMessages = relatedJids
+      .flatMap(jid => getRecentMessages(jid, limit))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+      .slice(-limit);
+
+    res.json(allMessages);
   });
 
   return router;

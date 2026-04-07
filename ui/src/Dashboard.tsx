@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import Markdown from 'react-markdown';
 import { getExistingGroups, createChat, getChatMessages, getSetup } from './api';
 import type { ExistingGroup, ChatMessage } from './api';
+import { PersonaPage } from './PersonaPage';
+import { ActivityPage } from './ActivityPage';
 
 interface SidebarItem {
   id: string;       // unique key for sidebar
@@ -36,6 +39,8 @@ export function Dashboard() {
   const [isThinking, setIsThinking] = useState(false);
   const [defaultModel, setDefaultModel] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeView, setActiveView] = useState<'chat' | 'persona'>('chat');
+  const [activeTab, setActiveTab] = useState<'chats' | 'activity'>('chats');
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -130,6 +135,8 @@ export function Dashboard() {
   }, []);
 
   async function selectItem(item: SidebarItem) {
+    setActiveView('chat');
+    setActiveTab('chats');
     setActiveId(item.id);
 
     if (!chats[item.id]) {
@@ -223,6 +230,19 @@ export function Dashboard() {
           </button>
         </div>
 
+        <div className="sidebar-tabs">
+          <button
+            className={`sidebar-tab ${activeTab === 'chats' ? 'active' : ''}`}
+            onClick={() => setActiveTab('chats')}
+          >Chats</button>
+          <button
+            className={`sidebar-tab ${activeTab === 'activity' ? 'active' : ''}`}
+            onClick={() => setActiveTab('activity')}
+          >Activity</button>
+        </div>
+
+        {activeTab === 'chats' && (
+        <>
         <div className="sidebar-section-label">Agents</div>
 
         <div className="sidebar-agents">
@@ -243,13 +263,24 @@ export function Dashboard() {
           ))}
         </div>
 
-        <button
-          className="sidebar-add-btn"
-          onClick={() => setShowCreateModal(true)}
-        >
-          <span style={{ fontSize: '1.1rem' }}>+</span>
-          <span>New Chat</span>
-        </button>
+        <div className="sidebar-bottom">
+          <button
+            className={`sidebar-bottom-btn ${activeView === 'persona' ? 'active' : ''}`}
+            onClick={() => { setActiveView('persona'); setActiveId(null); }}
+          >
+            <span className="sidebar-bottom-icon">&#9830;</span>
+            <span>Persona</span>
+          </button>
+          <button
+            className="sidebar-bottom-btn"
+            onClick={() => setShowCreateModal(true)}
+          >
+            <span className="sidebar-bottom-icon">+</span>
+            <span>New Chat</span>
+          </button>
+        </div>
+        </>
+        )}
       </motion.div>
 
       {/* Floating toggle when sidebar is closed */}
@@ -265,9 +296,23 @@ export function Dashboard() {
         </motion.button>
       )}
 
-      {/* Chat Area */}
+      {/* Main Content Area */}
       <div className="chat-area">
-        {activeItem ? (
+        <AnimatePresence mode="wait">
+        {activeTab === 'activity' ? (
+          <motion.div
+            key="activity"
+            style={{ flex: 1, display: 'flex', width: '100%' }}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+          >
+            <ActivityPage wsRef={wsRef} />
+          </motion.div>
+        ) : activeView === 'persona' ? (
+          <PersonaPage />
+        ) : activeItem ? (
           <>
             <motion.div
               className="chat-header"
@@ -303,12 +348,20 @@ export function Dashboard() {
                 {activeChat?.messages.map((msg) => (
                   <motion.div
                     key={msg.id}
-                    className={`message ${msg.is_from_me || msg.sender === 'user' ? 'user' : 'agent'}`}
+                    className={`message ${!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi') ? 'user' : 'agent'}`}
                     initial={{ opacity: 0, y: 12 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                   >
-                    <div className="message-bubble">{msg.content}</div>
+                    {!(!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi')) && (
+                      <div className="message-sender">{activeItem.name}</div>
+                    )}
+                    <div className="message-bubble">
+                      {(!msg.is_bot_message && (msg.sender === 'user' || msg.sender_name === 'User' || msg.sender_name === 'rishi'))
+                        ? msg.content
+                        : <Markdown>{msg.content}</Markdown>
+                      }
+                    </div>
                   </motion.div>
                 ))}
               </AnimatePresence>
@@ -477,6 +530,7 @@ export function Dashboard() {
             </motion.p>
           </div>
         )}
+        </AnimatePresence>
       </div>
 
       {/* Create Agent Modal */}
