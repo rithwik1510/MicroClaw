@@ -4,7 +4,7 @@ import { GroupQueue } from './group-queue.js';
 
 // Mock config to control concurrency limit
 vi.mock('./config.js', () => ({
-  DATA_DIR: '/tmp/nanoclaw-test-data',
+  DATA_DIR: '/tmp/microclaw-test-data',
   MAX_CONCURRENT_CONTAINERS: 2,
 }));
 
@@ -396,6 +396,40 @@ describe('GroupQueue', () => {
 
     resolveTask!();
     await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage guarantees a drain pass after active run completes', async () => {
+    let resolveFirstRun: () => void;
+    let callCount = 0;
+
+    const processMessages = vi.fn(async () => {
+      callCount++;
+      if (callCount === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirstRun = resolve;
+        });
+      }
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'container-1',
+      'test-group',
+    );
+
+    // Follow-up arrives while first run is active.
+    const piped = queue.sendMessage('group1@g.us', 'follow-up');
+    expect(piped).toBe(true);
+
+    // After first run exits, queue performs one guaranteed drain pass.
+    resolveFirstRun!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(processMessages).toHaveBeenCalledTimes(2);
   });
 
   it('preempts when idle arrives with pending tasks', async () => {
