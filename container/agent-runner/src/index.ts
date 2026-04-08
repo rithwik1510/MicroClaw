@@ -18,15 +18,29 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { createRuntimeAdapter } from './runtime/factory.js';
+import { resolveExternalRuntimeBudgets } from './runtime/budgets.js';
+import { RuntimeConfig, RuntimeProvider } from './runtime/types.js';
 
 interface ContainerInput {
   prompt: string;
+  systemPrompt?: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
+  singleTurn?: boolean;
   isScheduledTask?: boolean;
+  isHeartbeat?: boolean;
   assistantName?: string;
+  runtimeProfileId?: string;
+  runtimeConfig?: RuntimeConfig;
+  retryPolicy?: {
+    maxAttempts: number;
+    backoffMs: number;
+    retryableErrors: string[];
+    timeoutMs: number;
+  };
   secrets?: Record<string, string>;
 }
 
@@ -55,7 +69,7 @@ interface SDKUserMessage {
   session_id: string;
 }
 
-const IPC_INPUT_DIR = '/workspace/ipc/input';
+const IPC_INPUT_DIR = process.env.NANOCLAW_IPC_INPUT_DIR || '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
@@ -116,6 +130,47 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function getRuntimeConfig(input: ContainerInput): RuntimeConfig {
+  const cfg = input.runtimeConfig;
+  if (cfg?.provider && cfg.model) {
+    return cfg;
+  }
+  return {
+    provider: 'claude',
+    model: 'claude-sonnet-4-5',
+  };
+}
+
+function loadLegacySystemPrompt(containerInput: ContainerInput): string[] {
+  if (containerInput.systemPrompt?.trim()) {
+    return [containerInput.systemPrompt.trim()];
+  }
+
+  const prompts: string[] = [];
+  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+  const localClaudeMdPath = '/workspace/group/CLAUDE.md';
+
+  if (fs.existsSync(globalClaudeMdPath)) {
+    prompts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8').trim());
+  }
+  if (fs.existsSync(localClaudeMdPath)) {
+    prompts.push(fs.readFileSync(localClaudeMdPath, 'utf-8').trim());
+  }
+  return prompts.filter(Boolean);
+}
+
+function buildSystemPrompt(containerInput: ContainerInput): string | undefined {
+  const prompts = loadLegacySystemPrompt(containerInput);
+  if (containerInput.runtimeConfig?.plannerCritic?.enabled !== false) {
+    prompts.push(
+      'For complex multi-step tasks: Think through your approach step-by-step before acting. ' +
+        'After completing the task, briefly self-evaluate whether the response is complete and accurate before finishing.',
+    );
+  }
+  if (prompts.length === 0) return undefined;
+  return prompts.join('\n\n');
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -392,11 +447,7 @@ async function runQuery(
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
-  const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
-  }
+  const globalClaudeMd = buildSystemPrompt(containerInput);
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -490,6 +541,129 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+async function runExternalRuntimeQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  containerInput: ContainerInput,
+): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
+  if (shouldClose()) {
+    log('Close sentinel detected before non-Claude query');
+    return { newSessionId: sessionId, closedDuringQuery: true };
+  }
+
+  const runtimeConfig = getRuntimeConfig(containerInput);
+  const adapter = createRuntimeAdapter(runtimeConfig);
+  const retry = containerInput.retryPolicy || {
+    maxAttempts: 1,
+    backoffMs: 0,
+    timeoutMs: 90000,
+  };
+  const retryablePatterns: string[] = Array.isArray(
+    (retry as { retryableErrors?: unknown }).retryableErrors,
+  )
+    ? ((retry as { retryableErrors?: unknown[] }).retryableErrors as unknown[])
+        .map((x) => String(x))
+    : [];
+  const systemPrompt = buildSystemPrompt(containerInput);
+  const maxAttempts = Math.max(1, retry.maxAttempts || 1);
+  const totalRuntimeBudgetMs = Math.max(10_000, retry.timeoutMs || 90_000);
+  const runtimeStartedAt = Date.now();
+  const configuredRequestTimeoutMs = Number.parseInt(
+    containerInput.secrets?.OPENAI_REQUEST_TIMEOUT_MS || '',
+    10,
+  );
+  const configuredToolLoopBudgetMs = Number.parseInt(
+    containerInput.secrets?.WEB_TOOL_LOOP_BUDGET_MS || '',
+    10,
+  );
+
+  const isRetryableError = (message: string): boolean => {
+    if (retryablePatterns.length === 0) return false;
+    const lower = message.toLowerCase();
+    return retryablePatterns.some((p) => lower.includes(p.toLowerCase()));
+  };
+
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const elapsedMs = Date.now() - runtimeStartedAt;
+    const remainingBudgetMs = totalRuntimeBudgetMs - elapsedMs;
+    if (remainingBudgetMs <= 0) {
+      lastError = new Error(
+        `Runtime timeout after ${totalRuntimeBudgetMs}ms`,
+      );
+      break;
+    }
+
+    const budgets = resolveExternalRuntimeBudgets({
+      capabilityRoute: containerInput.runtimeConfig?.capabilityRoute,
+      configuredRequestTimeoutMs,
+      configuredToolLoopBudgetMs,
+      remainingRuntimeBudgetMs: remainingBudgetMs,
+      webTotalBudgetMs:
+        containerInput.runtimeConfig?.toolPolicy?.web?.totalBudgetMs,
+      browserTotalBudgetMs:
+        containerInput.runtimeConfig?.toolPolicy?.browser?.totalBudgetMs,
+    });
+
+    const boundedSecrets = {
+      ...(containerInput.secrets || {}),
+      OPENAI_REQUEST_TIMEOUT_MS: String(
+        budgets.effectiveRequestTimeoutMs,
+      ),
+      WEB_TOOL_LOOP_BUDGET_MS: String(
+        budgets.effectiveToolLoopBudgetMs,
+      ),
+    };
+
+    try {
+      const response = await adapter.run({
+        prompt,
+        systemPrompt,
+        config: runtimeConfig,
+        secrets: boundedSecrets,
+      });
+      writeOutput({
+        status: 'success',
+        result: response.result,
+        newSessionId: response.sessionId,
+      });
+      return {
+        newSessionId: response.sessionId,
+        closedDuringQuery: false,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      log(
+        `Non-Claude runtime attempt ${attempt}/${maxAttempts} failed: ${lastError.message}`,
+      );
+      const canRetry =
+        attempt < maxAttempts &&
+        isRetryableError(lastError.message) &&
+        Date.now() - runtimeStartedAt < totalRuntimeBudgetMs;
+      if (canRetry) {
+        const remaining = totalRuntimeBudgetMs - (Date.now() - runtimeStartedAt);
+        const delay = Math.max(0, Math.min(retry.backoffMs || 0, remaining));
+        if (delay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+      } else {
+        break;
+      }
+    }
+  }
+
+  writeOutput({
+    status: 'error',
+    result: null,
+    newSessionId: sessionId,
+    error: lastError?.message || 'Unknown runtime error',
+  });
+  return {
+    newSessionId: sessionId,
+    closedDuringQuery: false,
+  };
+}
+
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -519,6 +693,11 @@ async function main(): Promise<void> {
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
 
   let sessionId = containerInput.sessionId;
+  const runtimeConfig = getRuntimeConfig(containerInput);
+  const runtimeProvider: RuntimeProvider = runtimeConfig.provider;
+  log(
+    `Runtime selected: profile=${containerInput.runtimeProfileId || 'builtin'} provider=${runtimeProvider} model=${runtimeConfig.model} toolPolicy=${JSON.stringify(runtimeConfig.toolPolicy || {})}`,
+  );
   fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
 
   // Clean up stale _close sentinel from previous container runs
@@ -541,7 +720,17 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult =
+        runtimeProvider === 'claude'
+          ? await runQuery(
+              prompt,
+              sessionId,
+              mcpServerPath,
+              containerInput,
+              sdkEnv,
+              resumeAt,
+            )
+          : await runExternalRuntimeQuery(prompt, sessionId, containerInput);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -554,6 +743,19 @@ async function main(): Promise<void> {
       // idle timer and cause a 30-min delay before the next _close).
       if (queryResult.closedDuringQuery) {
         log('Close sentinel consumed during query, exiting');
+        break;
+      }
+
+      if (containerInput.singleTurn) {
+        log('Single-turn mode enabled, exiting after first query');
+        break;
+      }
+
+      // OpenAI-compatible runtimes are request/response by nature.
+      // Keep them single-turn to avoid idle IPC loops that can outlive the
+      // real answer and then trip host-side timeouts.
+      if (runtimeProvider !== 'claude') {
+        log('External runtime mode: exiting after first query');
         break;
       }
 
