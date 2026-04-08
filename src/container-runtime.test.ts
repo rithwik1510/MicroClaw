@@ -40,8 +40,8 @@ describe('readonlyMountArgs', () => {
 
 describe('stopContainer', () => {
   it('returns stop command using CONTAINER_RUNTIME_BIN', () => {
-    expect(stopContainer('nanoclaw-test-123')).toBe(
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-test-123`,
+    expect(stopContainer('microclaw-test-123')).toBe(
+      `${CONTAINER_RUNTIME_BIN} stop microclaw-test-123`,
     );
   });
 });
@@ -79,47 +79,51 @@ describe('ensureContainerRuntimeRunning', () => {
 // --- cleanupOrphans ---
 
 describe('cleanupOrphans', () => {
-  it('stops orphaned nanoclaw containers', () => {
+  it('stops orphaned microclaw containers', () => {
+    // docker info check passes
+    mockExecSync.mockReturnValueOnce('');
     // docker ps returns container names, one per line
     mockExecSync.mockReturnValueOnce(
-      'nanoclaw-group1-111\nnanoclaw-group2-222\n',
+      'microclaw-group1-111\nmicroclaw-group2-222\n',
     );
     // stop calls succeed
     mockExecSync.mockReturnValue('');
 
     cleanupOrphans();
 
-    // ps + 2 stop calls
-    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    // info + ps + 2 stop calls
+    expect(mockExecSync).toHaveBeenCalledTimes(4);
     expect(mockExecSync).toHaveBeenNthCalledWith(
-      2,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group1-111`,
+      3,
+      `${CONTAINER_RUNTIME_BIN} stop microclaw-group1-111`,
       { stdio: 'pipe' },
     );
     expect(mockExecSync).toHaveBeenNthCalledWith(
-      3,
-      `${CONTAINER_RUNTIME_BIN} stop nanoclaw-group2-222`,
+      4,
+      `${CONTAINER_RUNTIME_BIN} stop microclaw-group2-222`,
       { stdio: 'pipe' },
     );
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-group1-111', 'nanoclaw-group2-222'] },
+      { count: 2, names: ['microclaw-group1-111', 'microclaw-group2-222'] },
       'Stopped orphaned containers',
     );
   });
 
   it('does nothing when no orphans exist', () => {
-    mockExecSync.mockReturnValueOnce('');
+    mockExecSync.mockReturnValueOnce(''); // info
+    mockExecSync.mockReturnValueOnce(''); // ps
 
     cleanupOrphans();
 
-    expect(mockExecSync).toHaveBeenCalledTimes(1);
+    expect(mockExecSync).toHaveBeenCalledTimes(2);
     expect(logger.info).not.toHaveBeenCalled();
   });
 
   it('warns and continues when ps fails', () => {
+    mockExecSync.mockReturnValueOnce(''); // info ok
     mockExecSync.mockImplementationOnce(() => {
-      throw new Error('docker not available');
-    });
+      throw new Error('docker ps failed');
+    }); // ps fails
 
     cleanupOrphans(); // should not throw
 
@@ -130,7 +134,8 @@ describe('cleanupOrphans', () => {
   });
 
   it('continues stopping remaining containers when one stop fails', () => {
-    mockExecSync.mockReturnValueOnce('nanoclaw-a-1\nnanoclaw-b-2\n');
+    mockExecSync.mockReturnValueOnce(''); // info
+    mockExecSync.mockReturnValueOnce('microclaw-a-1\nmicroclaw-b-2\n'); // ps
     // First stop fails
     mockExecSync.mockImplementationOnce(() => {
       throw new Error('already stopped');
@@ -140,9 +145,9 @@ describe('cleanupOrphans', () => {
 
     cleanupOrphans(); // should not throw
 
-    expect(mockExecSync).toHaveBeenCalledTimes(3);
+    expect(mockExecSync).toHaveBeenCalledTimes(4);
     expect(logger.info).toHaveBeenCalledWith(
-      { count: 2, names: ['nanoclaw-a-1', 'nanoclaw-b-2'] },
+      { count: 2, names: ['microclaw-a-1', 'microclaw-b-2'] },
       'Stopped orphaned containers',
     );
   });

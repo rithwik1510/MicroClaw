@@ -1,5 +1,5 @@
 /**
- * Container Runner for NanoClaw
+ * Container Runner for MicroClaw
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
@@ -24,7 +24,11 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
-import { RegisteredGroup } from './types.js';
+import {
+  RegisteredGroup,
+  RetryPolicy,
+  RuntimeExecutionConfig,
+} from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -32,12 +36,18 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
 export interface ContainerInput {
   prompt: string;
+  systemPrompt?: string;
   sessionId?: string;
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
+  singleTurn?: boolean;
   isScheduledTask?: boolean;
+  isHeartbeat?: boolean;
   assistantName?: string;
+  runtimeProfileId?: string;
+  runtimeConfig?: RuntimeExecutionConfig;
+  retryPolicy?: RetryPolicy;
   secrets?: Record<string, string>;
 }
 
@@ -188,8 +198,14 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    // Always sync host runner source into the per-group workspace so runtime
+    // fixes take effect without requiring manual session folder cleanup.
+    fs.mkdirSync(groupAgentRunnerDir, { recursive: true });
+    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, {
+      recursive: true,
+      force: true,
+    });
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
@@ -214,12 +230,43 @@ function buildVolumeMounts(
  * Read allowed secrets from .env for passing to the container via stdin.
  * Secrets are never written to disk or mounted as files.
  */
-function readSecrets(): Record<string, string> {
+export function readSecretsForAgent(): Record<string, string> {
   return readEnvFile([
     'CLAUDE_CODE_OAUTH_TOKEN',
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
+    'OPENAI_API_KEY',
+    'OPENAI_COMPAT_BASE_URL',
+    'OPENAI_REQUEST_TIMEOUT_MS',
+    'OPENAI_MAX_OUTPUT_TOKENS',
+    'OPENAI_CONTEXT_WINDOW_TOKENS',
+    'OPENAI_INPUT_BUDGET_TOKENS',
+    'OPENAI_INPUT_BUDGET_CHARS',
+    'WEB_SEARCH_PROVIDER',
+    'WEB_FETCH_PROVIDER',
+    'WEB_BROWSER_FALLBACK',
+    'SEARXNG_BASE_URL',
+    'WEB_SEARCH_MAX_RESULTS',
+    'WEB_FETCH_MAX_CHARS',
+    'WEB_FETCH_MAX_RESPONSE_BYTES',
+    'WEB_SEARCH_CACHE_TTL_MINUTES',
+    'WEB_FETCH_CACHE_TTL_MINUTES',
+    'WEB_TOOL_PRIMARY',
+    'WEB_TOOL_ENABLE_MODE',
+    'WEB_TOOL_FALLBACK',
+    'WEB_TOOL_MAX_STEPS',
+    'WEB_TOOL_MAX_SEARCH_CALLS',
+    'WEB_TOOL_SEARCH_TIMEOUT_MS',
+    'WEB_TOOL_PAGE_FETCH_TIMEOUT_MS',
+    'WEB_TOOL_TOTAL_BUDGET_MS',
+    'WEB_TOOL_LOOP_BUDGET_MS',
+    'WEB_RESTRICTED_DOMAINS',
+    'NANOCLAW_BROWSER_HEADLESS',
+    'NANOCLAW_BROWSER_MAX_CONCURRENT_SESSIONS',
+    'BROWSER_SESSION_MODE',
+    'BROWSER_TOOL_MAX_STEPS',
+    'BROWSER_TOOL_TOTAL_BUDGET_MS',
   ]);
 }
 
@@ -240,6 +287,12 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Enable host.docker.internal on Linux for local model endpoint access.
+  // Docker Desktop already provides this on macOS/Windows.
+  if (CONTAINER_RUNTIME_BIN === 'docker') {
+    args.push('--add-host', 'host.docker.internal:host-gateway');
   }
 
   for (const mount of mounts) {
@@ -268,7 +321,7 @@ export async function runContainerAgent(
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
-  const containerName = `nanoclaw-${safeName}-${Date.now()}`;
+  const containerName = `microclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
 
   logger.debug(
@@ -309,8 +362,14 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    // Pass secrets via stdin (never written to disk or mounted as files)
-    input.secrets = readSecrets();
+    // Pass secrets via stdin (never written to disk or mounted as files).
+    // Priority: resolved runtime/auth secrets > legacy .env secrets.
+    input.secrets = {
+      ...readSecretsForAgent(),
+      NANOCLAW_GROUP_FOLDER: input.groupFolder,
+      NANOCLAW_CHAT_JID: input.chatJid,
+      ...(input.secrets || {}),
+    };
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
