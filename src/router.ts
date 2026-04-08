@@ -17,6 +17,20 @@ export function formatMessages(messages: NewMessage[]): string {
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
 
+export function formatConversationHistory(
+  messages: NewMessage[],
+  assistantName: string,
+): string {
+  const lines = messages.map((m) => {
+    const role =
+      m.is_bot_message || m.sender_name === assistantName
+        ? 'assistant'
+        : 'user';
+    return `<message role="${role}" sender="${escapeXml(m.sender_name)}" time="${m.timestamp}">${escapeXml(m.content)}</message>`;
+  });
+  return `<conversation>\n${lines.join('\n')}\n</conversation>`;
+}
+
 export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
 }
