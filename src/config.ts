@@ -97,7 +97,10 @@ export const OPENAI_SESSION_IDLE_TIMEOUT_MS = parsePositiveInt(
 // Interactive messages always get priority access to container slots.
 export const MAX_INTERACTIVE_CONTAINERS = Math.max(
   1,
-  parsePositiveInt(process.env.MAX_INTERACTIVE_CONTAINERS, Math.max(1, MAX_CONCURRENT_CONTAINERS - 1)),
+  parsePositiveInt(
+    process.env.MAX_INTERACTIVE_CONTAINERS,
+    Math.max(1, MAX_CONCURRENT_CONTAINERS - 1),
+  ),
 );
 export const MAX_BACKGROUND_CONTAINERS = Math.max(
   1,

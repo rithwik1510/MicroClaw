@@ -68,8 +68,7 @@ describe('memory helpers', () => {
           chat_jid: 'dc:test',
           sender: 'user',
           sender_name: 'User',
-          content:
-            'I prefer practical replies that get straight to the point',
+          content: 'I prefer practical replies that get straight to the point',
           timestamp: '2026-03-07T10:01:00.000Z',
         },
       ],

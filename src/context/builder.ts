@@ -248,10 +248,7 @@ function extractStrongKeywords(promptText: string): string[] {
   return Array.from(new Set(merged)).slice(0, 12);
 }
 
-function isUsefulRetrievedMemory(
-  kind: string,
-  content: string,
-): boolean {
+function isUsefulRetrievedMemory(kind: string, content: string): boolean {
   const normalized = content.trim().toLowerCase();
   if (!normalized || normalized.length < 12) return false;
   if (normalized.includes('?')) return false;
@@ -1105,11 +1102,13 @@ export function buildContextBundle(
       (entry) => `[${entry.kind}] ${entry.content}`,
     ),
     CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
-  ).map((line, index) => ({
-    content: line.replace(/^\[[^\]]+\]\s+/, ''),
-    kind: line.match(/^\[([^\]]+)\]/)?.[1] || 'memory',
-    rank: index,
-  })).filter((entry) => isUsefulRetrievedMemory(entry.kind, entry.content));
+  )
+    .map((line, index) => ({
+      content: line.replace(/^\[[^\]]+\]\s+/, ''),
+      kind: line.match(/^\[([^\]]+)\]/)?.[1] || 'memory',
+      rank: index,
+    }))
+    .filter((entry) => isUsefulRetrievedMemory(entry.kind, entry.content));
   layers.push(buildRetrievedMemoryLayer(pinnedEntries, retrievedEntries));
 
   for (const layer of layers) {

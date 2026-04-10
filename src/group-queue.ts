@@ -158,13 +158,21 @@ export class GroupQueue {
     }
 
     // Background lane: enforce its own concurrency limit
-    if (lane === 'background' && this.backgroundActiveCount >= MAX_BACKGROUND_CONTAINERS) {
+    if (
+      lane === 'background' &&
+      this.backgroundActiveCount >= MAX_BACKGROUND_CONTAINERS
+    ) {
       state.pendingTasks.push({ id: taskId, groupJid, fn, lane });
       if (!this.waitingBackground.includes(groupJid)) {
         this.waitingBackground.push(groupJid);
       }
       logger.debug(
-        { groupJid, taskId, activeCount: this.activeCount, backgroundActiveCount: this.backgroundActiveCount },
+        {
+          groupJid,
+          taskId,
+          activeCount: this.activeCount,
+          backgroundActiveCount: this.backgroundActiveCount,
+        },
         'At background concurrency limit, task queued',
       );
       return;
@@ -298,7 +306,13 @@ export class GroupQueue {
     if (lane === 'background') this.backgroundActiveCount++;
 
     logger.debug(
-      { groupJid, reason, lane, activeCount: this.activeCount, backgroundActiveCount: this.backgroundActiveCount },
+      {
+        groupJid,
+        reason,
+        lane,
+        activeCount: this.activeCount,
+        backgroundActiveCount: this.backgroundActiveCount,
+      },
       'Starting container for group',
     );
 
@@ -339,7 +353,12 @@ export class GroupQueue {
     if (task.lane === 'background') this.backgroundActiveCount++;
 
     logger.debug(
-      { groupJid, taskId: task.id, lane: task.lane, activeCount: this.activeCount },
+      {
+        groupJid,
+        taskId: task.id,
+        lane: task.lane,
+        activeCount: this.activeCount,
+      },
       'Running queued task',
     );
 
@@ -392,8 +411,12 @@ export class GroupQueue {
 
     // Tasks first (they won't be re-discovered from SQLite like messages).
     // Prioritize interactive tasks before background.
-    const interactiveTasks = state.pendingTasks.filter((t) => t.lane === 'interactive');
-    const backgroundTasks = state.pendingTasks.filter((t) => t.lane === 'background');
+    const interactiveTasks = state.pendingTasks.filter(
+      (t) => t.lane === 'interactive',
+    );
+    const backgroundTasks = state.pendingTasks.filter(
+      (t) => t.lane === 'background',
+    );
     const nextTask = interactiveTasks[0] ?? backgroundTasks[0];
 
     if (nextTask) {
@@ -464,7 +487,9 @@ export class GroupQueue {
       const nextJid = this.waitingInteractive.shift()!;
       const state = this.getGroup(nextJid);
 
-      const interactiveTasks = state.pendingTasks.filter((t) => t.lane === 'interactive');
+      const interactiveTasks = state.pendingTasks.filter(
+        (t) => t.lane === 'interactive',
+      );
       const task = interactiveTasks[0];
       if (task) {
         state.pendingTasks.splice(state.pendingTasks.indexOf(task), 1);
@@ -493,7 +518,9 @@ export class GroupQueue {
       const nextJid = this.waitingBackground.shift()!;
       const state = this.getGroup(nextJid);
 
-      const backgroundTasks = state.pendingTasks.filter((t) => t.lane === 'background');
+      const backgroundTasks = state.pendingTasks.filter(
+        (t) => t.lane === 'background',
+      );
       const task = backgroundTasks[0];
       if (task) {
         state.pendingTasks.splice(state.pendingTasks.indexOf(task), 1);
