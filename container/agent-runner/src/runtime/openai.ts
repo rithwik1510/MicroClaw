@@ -1218,6 +1218,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
   private resolveToolChoice(input: {
     usingBrowserFlow: boolean;
+    usingWebFlow: boolean;
     sawToolCalls: boolean;
     bootstrapUsed: boolean;
     prompt: string;
@@ -1237,6 +1238,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       !input.sawToolCalls &&
       (!input.bootstrapUsed || this.browserTaskNeedsFollowUp(input.prompt))
     ) {
+      return 'required';
+    }
+    // Force web_search on the first step for web lookup routes so the model
+    // cannot skip tool use by generating "let me search..." text instead.
+    if (input.usingWebFlow && !input.sawToolCalls) {
       return 'required';
     }
 
@@ -1782,7 +1788,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
   private looksLikeStaleKnowledgeFallback(text: string): boolean {
     const t = text.toLowerCase();
-    return (
+    // Stale-knowledge disclaimers
+    if (
       t.includes('knowledge cutoff') ||
       t.includes('as of my knowledge cutoff') ||
       t.includes('as of my last update') ||
@@ -1793,7 +1800,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       t.includes('visit anthropic') ||
       t.includes('official blog') ||
       t.includes('github repository')
-    );
+    ) {
+      return true;
+    }
+    // Model verbally announced a search/fetch but never called a tool —
+    // treat as needing forced prefetch so the actual search runs.
+    return /\b(let me (check|search|look up|lookup|fetch|find|get|pull up)|searching now|fetching|i['']ll (search|look|check|fetch)|looking that up|one moment|checking now)\b/.test(t);
   }
 
   private isStrongWebIntent(prompt: string): boolean {
@@ -2343,6 +2355,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               tools: activeTools,
               tool_choice: this.resolveToolChoice({
                 usingBrowserFlow,
+                usingWebFlow: webEnabled && route === 'web_lookup',
                 sawToolCalls: sawToolCalls && schedulingResolved,
                 bootstrapUsed: bootstrapState.used,
                 prompt: req.prompt,

@@ -400,33 +400,6 @@ export class DiscordChannel implements Channel {
     }
   }
 
-  async updateMessage(
-    jid: string,
-    ref: ChannelMessageRef,
-    text: string,
-  ): Promise<void> {
-    if (!this.client) return;
-    if (text.length > 2000) {
-      throw new Error('Discord message edit exceeds 2000 characters');
-    }
-    const channelId = jid.replace(/^dc:/, '');
-    const channel = await this.client.channels.fetch(channelId);
-    if (!channel || !('messages' in channel)) {
-      throw new Error('Discord channel not found for message edit');
-    }
-    const message = await (channel as TextChannel).messages.fetch(ref.id);
-    await message.edit(text);
-  }
-
-  async deleteMessage(jid: string, ref: ChannelMessageRef): Promise<void> {
-    if (!this.client) return;
-    const channelId = jid.replace(/^dc:/, '');
-    const channel = await this.client.channels.fetch(channelId);
-    if (!channel || !('messages' in channel)) return;
-    const message = await (channel as TextChannel).messages.fetch(ref.id);
-    await message.delete().catch(() => undefined);
-  }
-
   isConnected(): boolean {
     return this.client !== null && this.client.isReady();
   }

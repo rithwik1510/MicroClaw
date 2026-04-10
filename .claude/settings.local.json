@@ -39,7 +39,12 @@
       "Read(//c/Users/posan/OneDrive/Desktop/RIA BOT/nanoclaw/**)",
       "Bash(done)",
       "Bash(node:*)",
-      "Bash(grep -E \"\\\\.ts$|^d\")"
+      "Bash(grep -E \"\\\\.ts$|^d\")",
+      "Bash(tasklist)",
+      "Bash(curl:*)",
+      "Bash(taskkill /PID 2816 /F)",
+      "Bash(taskkill /PID 27412 /F)",
+      "Bash(cmd //c \"taskkill /PID 2816 /F\")"
     ]
   }
 }
