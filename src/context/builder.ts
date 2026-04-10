@@ -30,7 +30,11 @@ interface BuildContextBundleInput {
   groupFolder: string;
   prompt: string;
   today?: Date;
-  turnMode?: 'conversational' | 'memory_assisted' | 'web_browser' | 'scheduling_planning';
+  turnMode?:
+    | 'conversational'
+    | 'memory_assisted'
+    | 'web_browser'
+    | 'scheduling_planning';
   reservedToolChars?: number;
   actualToolSchemaChars?: number;
 }
@@ -221,8 +225,9 @@ function extractStrongKeywords(promptText: string): string[] {
     ),
   ).map((match) => match[0].toLowerCase());
   const identifiers =
-    promptText.match(/\b[A-Z][A-Za-z0-9_-]{2,}\b|\b[a-z]+[A-Z][A-Za-z0-9_-]*\b/g) ||
-    [];
+    promptText.match(
+      /\b[A-Z][A-Za-z0-9_-]{2,}\b|\b[a-z]+[A-Z][A-Za-z0-9_-]*\b/g,
+    ) || [];
 
   const tokens =
     promptText.toLowerCase().match(/[a-z0-9][a-z0-9._/-]{3,}/g) || [];
@@ -233,8 +238,44 @@ function extractStrongKeywords(promptText: string): string[] {
     return true;
   });
 
-  const merged = [...quoted, ...urls, ...domains, ...identifiers.map((v) => v.toLowerCase()), ...filtered];
+  const merged = [
+    ...quoted,
+    ...urls,
+    ...domains,
+    ...identifiers.map((v) => v.toLowerCase()),
+    ...filtered,
+  ];
   return Array.from(new Set(merged)).slice(0, 12);
+}
+
+function isUsefulRetrievedMemory(
+  kind: string,
+  content: string,
+): boolean {
+  const normalized = content.trim().toLowerCase();
+  if (!normalized || normalized.length < 12) return false;
+  if (normalized.includes('?')) return false;
+  if (/https?:\/\//i.test(normalized)) return false;
+  if (
+    /\b(dont do a search|do not search|no search|explain me what i need to do|nothing about specific project today|best books to read|for suppose i am using)\b/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /^hey[, ]|keep this in your memory|if u remeber|if you remember/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  if (kind === 'loop') {
+    return /\b(follow up|revisit|remember|next|pending|open)\b/i.test(
+      normalized,
+    );
+  }
+  return true;
 }
 
 function readFileSnapshotIfPresent(filePath: string): FileSnapshot | null {
@@ -579,8 +620,14 @@ function buildCompactMemoryContent(raw: string, keywords: string[]): string {
     ],
     4,
   );
-  const filteredAnchorBullets = withoutOverlaps(anchorBullets, standing?.bullets || []);
-  const filteredRelevantBullets = withoutOverlaps(relevantBullets, filteredAnchorBullets);
+  const filteredAnchorBullets = withoutOverlaps(
+    anchorBullets,
+    standing?.bullets || [],
+  );
+  const filteredRelevantBullets = withoutOverlaps(
+    relevantBullets,
+    filteredAnchorBullets,
+  );
 
   const lines = ['# Memory'];
   if (filteredAnchorBullets.length > 0) {
@@ -592,6 +639,12 @@ function buildCompactMemoryContent(raw: string, keywords: string[]): string {
     for (const bullet of filteredRelevantBullets) lines.push(`- ${bullet}`);
   }
   return lines.join('\n');
+}
+
+function trimLayerToChars(layer: ContextLayer, maxChars: number): void {
+  if (!layer.included || !layer.content) return;
+  layer.content = applyTrimMode(layer.content, maxChars, layer.trimMode);
+  layer.trimmedChars = layer.content.length;
 }
 
 function compactLayerContent(
@@ -991,7 +1044,9 @@ export function buildContextBundle(
       ),
       included: false,
       inclusionReason:
-        strongKeywords.length === 0 ? 'no_strong_keywords' : 'turn_mode_suppressed',
+        strongKeywords.length === 0
+          ? 'no_strong_keywords'
+          : 'turn_mode_suppressed',
       trimMode: 'head',
       rawChars: 0,
       trimmedChars: 0,
@@ -1007,7 +1062,9 @@ export function buildContextBundle(
   }
   const pinnedEntries = (() => {
     try {
-      return getPinnedMemoryEntries(input.groupFolder);
+      return getPinnedMemoryEntries(input.groupFolder).filter((entry) =>
+        isUsefulRetrievedMemory(entry.kind, entry.content),
+      );
     } catch {
       return [];
     }
@@ -1044,13 +1101,15 @@ export function buildContextBundle(
         })()
       : [];
   const retrievedEntries = dedupe(
-    [...exactEntries, ...ftsEntries].map((entry) => `[${entry.kind}] ${entry.content}`),
+    [...exactEntries, ...ftsEntries].map(
+      (entry) => `[${entry.kind}] ${entry.content}`,
+    ),
     CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
   ).map((line, index) => ({
     content: line.replace(/^\[[^\]]+\]\s+/, ''),
     kind: line.match(/^\[([^\]]+)\]/)?.[1] || 'memory',
     rank: index,
-  }));
+  })).filter((entry) => isUsefulRetrievedMemory(entry.kind, entry.content));
   layers.push(buildRetrievedMemoryLayer(pinnedEntries, retrievedEntries));
 
   for (const layer of layers) {
@@ -1059,16 +1118,27 @@ export function buildContextBundle(
       turnMode === 'conversational' &&
       strongKeywords.length < 2
     ) {
-      layer.included = false;
-      layer.content = '';
-      layer.trimmedChars = 0;
-      layer.inclusionReason = 'turn_mode_suppressed';
+      trimLayerToChars(layer, 900);
+      layer.inclusionReason = 'always_on_anchor';
+    }
+    if (
+      layer.kind === 'retrieved_memory' &&
+      turnMode === 'conversational' &&
+      strongKeywords.length < 2 &&
+      layer.included
+    ) {
+      trimLayerToChars(layer, 700);
+      layer.inclusionReason =
+        layer.inclusionReason === 'pinned_and_fts5'
+          ? 'pinned_anchor'
+          : 'retrieved_anchor';
     }
   }
 
   suppressLegacyLayersIfModernContextPresent(layers);
 
-  const reservedToolChars = input.reservedToolChars || CONTEXT_RESERVED_TOOL_CHARS;
+  const reservedToolChars =
+    input.reservedToolChars || CONTEXT_RESERVED_TOOL_CHARS;
   const actualToolSchemaChars =
     input.actualToolSchemaChars || CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS;
   const warnings = shrinkLayersToBudget(

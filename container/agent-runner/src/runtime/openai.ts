@@ -1,8 +1,13 @@
 ﻿import fs from 'fs';
 import path from 'path';
 
-import { postJson, makeSessionId } from './http.js';
-import { RuntimeAdapter, RuntimeRequest, RuntimeResponse } from './types.js';
+import { postJson, postJsonStream, makeSessionId } from './http.js';
+import {
+  RuntimeAdapter,
+  RuntimeRequest,
+  RuntimeResponse,
+  RuntimeUsageMetrics,
+} from './types.js';
 import {
   buildToolRegistry,
   filterToolRegistry,
@@ -67,6 +72,64 @@ function visibleText(text: string): string {
   return stripThinkBlocks(text).trim();
 }
 
+function extractStreamDeltaText(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const choices = (payload as { choices?: Array<Record<string, unknown>> }).choices;
+  const delta = choices?.[0]?.delta as
+    | { content?: unknown; reasoning_content?: unknown }
+    | undefined;
+  if (!delta) return '';
+  if (typeof delta.content === 'string') return delta.content;
+  if (Array.isArray(delta.content)) {
+    return delta.content
+      .map((item) =>
+        item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string'
+          ? ((item as { text: string }).text)
+          : '',
+      )
+      .join('');
+  }
+  return '';
+}
+
+type UsageAccumulator = RuntimeUsageMetrics & {
+  requests: number;
+};
+
+function extractUsageMetrics(payload: unknown): RuntimeUsageMetrics | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const usage = (payload as { usage?: Record<string, unknown> }).usage;
+  if (!usage || typeof usage !== 'object') return null;
+
+  const inputTokens = Number(
+    usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? 0,
+  );
+  const outputTokens = Number(
+    usage.completion_tokens ??
+      usage.output_tokens ??
+      usage.completionTokens ??
+      0,
+  );
+  const totalTokens = Number(
+    usage.total_tokens ?? usage.totalTokens ?? inputTokens + outputTokens,
+  );
+
+  if (
+    !Number.isFinite(inputTokens) ||
+    !Number.isFinite(outputTokens) ||
+    !Number.isFinite(totalTokens)
+  ) {
+    return null;
+  }
+
+  return {
+    inputTokens: Math.max(0, Math.round(inputTokens)),
+    outputTokens: Math.max(0, Math.round(outputTokens)),
+    totalTokens: Math.max(0, Math.round(totalTokens)),
+    source: 'provider',
+  };
+}
+
 type StoredSources = {
   query: string;
   sources: string[];
@@ -84,6 +147,11 @@ type BrowserBootstrapState = {
 
 type PlanningIntensity = 'off' | 'optional' | 'recommended';
 type SchedulingMode = 'none' | 'once' | 'interval' | 'cron' | 'watch';
+type TurnMode =
+  | 'conversational'
+  | 'memory_assisted'
+  | 'web_browser'
+  | 'scheduling_planning';
 
 const MEMORY_FLUSH_TRIGGER_STEPS = 6;
 const MEMORY_FLUSH_BUDGET_RATIO = 0.65;
@@ -98,6 +166,136 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   private static readonly LOCAL_NON_TOOL_RESERVE_TOKENS = 250;
   private static readonly MIN_INPUT_BUDGET_TOKENS = 700;
 
+  private createUsageAccumulator(): UsageAccumulator {
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      source: 'provider',
+      requests: 0,
+    };
+  }
+
+  private estimateTokens(text: string): number {
+    if (!text) return 0;
+    return Math.max(1, Math.ceil(text.length / 4));
+  }
+
+  private estimateInputTokens(payload: unknown): number {
+    if (!payload || typeof payload !== 'object') return 0;
+    const record = payload as Record<string, unknown>;
+    if (typeof record.input === 'string') {
+      return this.estimateTokens(record.input);
+    }
+    if (Array.isArray(record.messages)) {
+      return this.estimateTokens(JSON.stringify(record.messages));
+    }
+    return this.estimateTokens(JSON.stringify(payload));
+  }
+
+  private recordUsage(
+    accumulator: UsageAccumulator,
+    payload: unknown,
+    requestBody: unknown,
+    fallbackOutputText: string,
+  ): void {
+    const usage =
+      extractUsageMetrics(payload) || {
+        inputTokens: this.estimateInputTokens(requestBody),
+        outputTokens: this.estimateTokens(fallbackOutputText),
+        totalTokens:
+          this.estimateInputTokens(requestBody) +
+          this.estimateTokens(fallbackOutputText),
+        source: 'estimated' as const,
+      };
+
+    accumulator.inputTokens += usage.inputTokens;
+    accumulator.outputTokens += usage.outputTokens;
+    accumulator.totalTokens += usage.totalTokens;
+    accumulator.requests += 1;
+    if (usage.source === 'estimated') {
+      accumulator.source = 'estimated';
+    }
+  }
+
+  private finalizeUsage(
+    accumulator: UsageAccumulator,
+  ): RuntimeUsageMetrics | undefined {
+    if (
+      accumulator.inputTokens <= 0 &&
+      accumulator.outputTokens <= 0 &&
+      accumulator.totalTokens <= 0
+    ) {
+      return undefined;
+    }
+
+    return {
+      inputTokens: accumulator.inputTokens,
+      outputTokens: accumulator.outputTokens,
+      totalTokens:
+        accumulator.totalTokens ||
+        accumulator.inputTokens + accumulator.outputTokens,
+      source: accumulator.source,
+      requests: accumulator.requests,
+    };
+  }
+
+  private shouldUseStreaming(req: RuntimeRequest, isLocal: boolean): boolean {
+    if (isLocal) return false;
+    if (!req.onPartialText) return false;
+    return req.config.capabilities?.supportsStreaming !== false;
+  }
+
+  private async streamChatCompletion(input: {
+    baseUrl: string;
+    authHeaders: Record<string, string>;
+    requestTimeoutMs: number;
+    requestBody: Record<string, unknown>;
+    usage: UsageAccumulator;
+    onPartialText?: RuntimeRequest['onPartialText'];
+  }): Promise<string> {
+    let rawText = '';
+    let lastVisible = '';
+    let finalUsagePayload: unknown = null;
+
+    await postJsonStream(
+      `${input.baseUrl.replace(/\/$/, '')}/chat/completions`,
+      {
+        ...input.requestBody,
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      input.authHeaders,
+      async (payload) => {
+        const delta = extractStreamDeltaText(payload);
+        if (delta) {
+          rawText += delta;
+          const nextVisible = visibleText(rawText);
+          if (nextVisible.length > lastVisible.length) {
+            const chunk = nextVisible.slice(lastVisible.length);
+            lastVisible = nextVisible;
+            if (input.onPartialText && (chunk.trim().length > 0 || /\s/.test(chunk))) {
+              await input.onPartialText(chunk);
+            }
+          }
+        }
+        if (extractUsageMetrics(payload)) {
+          finalUsagePayload = payload;
+        }
+      },
+      input.requestTimeoutMs,
+    );
+
+    const finalVisible = visibleText(rawText);
+    this.recordUsage(
+      input.usage,
+      finalUsagePayload || {},
+      input.requestBody,
+      finalVisible,
+    );
+    return finalVisible;
+  }
+
   private decodeXmlEntities(input: string): string {
     return input
       .replace(/&quot;/g, '"')
@@ -105,6 +303,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
       .replace(/&amp;/g, '&');
+  }
+
+  private resolveTimezone(): string {
+    return (
+      process.env.NANOCLAW_TIMEZONE ||
+      process.env.TZ ||
+      Intl.DateTimeFormat().resolvedOptions().timeZone ||
+      'UTC'
+    );
   }
 
   private currentTurnPrompt(prompt: string): string {
@@ -170,6 +377,69 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       if (blockedLinePatterns.some((pattern) => pattern.test(trimmed))) continue;
 
       sanitized.push(line);
+    }
+
+    const joined = sanitized.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    return joined || undefined;
+  }
+
+  private redactSensitiveRuntimeLine(line: string): string {
+    return line
+      .replace(/[A-Za-z]:\\[^\s"'`]+/g, '[redacted-path]')
+      .replace(
+        /(^|[\s(])\/(?:workspace|app|home|Users|tmp|var)\/[^\s"'`)]*/g,
+        (_match, prefix: string) => `${prefix}[redacted-path]`,
+      );
+  }
+
+  private sanitizeCloudRuntimeSystemPrompt(
+    systemPrompt: string | undefined,
+  ): string | undefined {
+    if (!systemPrompt?.trim()) return undefined;
+
+    const blockedHeadings = new Set([
+      'admin context',
+      'container mounts',
+      'troubleshooting',
+      'container build cache',
+    ]);
+
+    const blockedLinePatterns = [
+      /mcp__/i,
+      /\bsqlite3\b/i,
+      /\bapi[_ -]?key\b/i,
+      /\boauth\b/i,
+      /\bauthorization\b/i,
+      /\bsecret\b/i,
+      /\btoken\b/i,
+      /\bmount allowlist\b/i,
+      /readenvfile/i,
+    ];
+
+    const sanitized: string[] = [];
+    let skipSection = false;
+
+    for (const rawLine of systemPrompt.split('\n')) {
+      const line = rawLine.trimEnd();
+      const trimmed = line.trim();
+
+      if (/^##\s+/.test(trimmed)) {
+        const heading = trimmed.replace(/^##\s+/, '').trim().toLowerCase();
+        skipSection = blockedHeadings.has(heading);
+        continue;
+      }
+
+      if (skipSection) continue;
+      if (!trimmed) {
+        if (sanitized[sanitized.length - 1] !== '') sanitized.push('');
+        continue;
+      }
+      if (trimmed.startsWith('```')) continue;
+      if (trimmed.startsWith('|')) continue;
+      if (/^\s*[A-Z0-9_]+\s*=/.test(trimmed)) continue;
+      if (blockedLinePatterns.some((pattern) => pattern.test(trimmed))) continue;
+
+      sanitized.push(this.redactSensitiveRuntimeLine(line));
     }
 
     const joined = sanitized.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -344,6 +614,22 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     const trimmed = this.currentTurnPrompt(prompt).trim();
     if (!trimmed) return '';
 
+    // Scheduled task execution prompts wrap the actual task in a template.
+    // Extract just the task description to avoid feeding the entire instruction
+    // block as a search query (which produces gibberish DuckDuckGo can't handle).
+    if (/^\[Scheduled task execution\]/i.test(trimmed)) {
+      const taskMatch = trimmed.match(/^Task:\s*(.+)$/im);
+      if (taskMatch?.[1]?.trim()) return taskMatch[1].trim();
+    }
+
+    // Heartbeat prompts — extract the checklist content as the query seed.
+    if (/^\[Heartbeat check/i.test(trimmed)) {
+      const checklistMatch = trimmed.match(/## Checklist\s*\n([\s\S]+)/i);
+      if (checklistMatch?.[1]?.trim()) {
+        return checklistMatch[1].trim().split('\n')[0].replace(/^[-*]\s*/, '').trim();
+      }
+    }
+
     const messageMatches = Array.from(
       trimmed.matchAll(/<message\b[^>]*>([\s\S]*?)<\/message>/gi),
     );
@@ -464,7 +750,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     req: RuntimeRequest;
     baseUrl: string;
     maxOutputTokens: number;
-    toolsEnabled: boolean;
+    toolSchemaChars: number;
+    turnMode: TurnMode;
   }): number {
     const explicitChars = this.tryParsePositiveInt(
       input.req.secrets?.OPENAI_INPUT_BUDGET_CHARS,
@@ -493,9 +780,23 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       256,
       Math.min(input.maxOutputTokens, Math.floor(contextWindowTokens * 0.35)),
     );
-    const toolReserveTokens = input.toolsEnabled
-      ? OpenAIRuntimeAdapter.LOCAL_TOOL_RESERVE_TOKENS
-      : OpenAIRuntimeAdapter.LOCAL_NON_TOOL_RESERVE_TOKENS;
+    const dynamicToolReserveTokens =
+      input.toolSchemaChars > 0
+        ? Math.ceil((input.toolSchemaChars + 1800) / 4)
+        : 0;
+    const routeReserveTokens =
+      input.turnMode === 'conversational'
+        ? 120
+        : input.turnMode === 'memory_assisted'
+          ? 280
+          : 0;
+    const toolReserveTokens =
+      Math.max(
+        dynamicToolReserveTokens,
+        input.toolSchemaChars > 0
+          ? OpenAIRuntimeAdapter.LOCAL_TOOL_RESERVE_TOKENS
+          : OpenAIRuntimeAdapter.LOCAL_NON_TOOL_RESERVE_TOKENS,
+      ) + routeReserveTokens;
     const inputBudgetTokens = Math.max(
       OpenAIRuntimeAdapter.MIN_INPUT_BUDGET_TOKENS,
       contextWindowTokens - outputReserveTokens - toolReserveTokens,
@@ -551,6 +852,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     systemPrompt?: string;
     userPrompt: string;
     budgetChars: number;
+    systemBudgetRatio?: number;
   }): { systemPrompt?: string; userPrompt: string } {
     if (input.budgetChars <= 0) {
       return {
@@ -574,7 +876,10 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     const targetSystemBudget = systemPrompt
       ? Math.min(
           systemPrompt.length,
-          Math.max(1000, Math.floor(input.budgetChars * 0.38)),
+          Math.max(
+            1000,
+            Math.floor(input.budgetChars * (input.systemBudgetRatio ?? 0.38)),
+          ),
         )
       : 0;
     const targetUserBudget = Math.max(
@@ -669,8 +974,51 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     );
   }
 
+  private isMemoryAssistedPrompt(prompt: string): boolean {
+    const current = this.currentTurnPrompt(prompt).toLowerCase();
+    return /\b(remember|recall|what do you remember|what did i tell you|keep in mind|my preference|my timezone|my name is|from now on)\b/.test(
+      current,
+    );
+  }
+
+  private looksStructurallyMultiStep(prompt: string): boolean {
+    const current = this.currentTurnPrompt(prompt).toLowerCase();
+    return (
+      /\b(then|after that|and verify|compare|review carefully|investigate|analyze|step by step|walk through|audit)\b/.test(
+        current,
+      ) ||
+      current.split(',').length >= 3
+    );
+  }
+
+  private resolveTurnMode(input: {
+    req: RuntimeRequest;
+    route: ReturnType<OpenAIRuntimeAdapter['effectiveCapabilityRoute']>;
+    schedulingIntent: boolean;
+    watchIntent: boolean;
+    planningIntensity: PlanningIntensity;
+  }): TurnMode {
+    if (
+      input.schedulingIntent ||
+      input.watchIntent ||
+      input.planningIntensity === 'recommended'
+    ) {
+      return 'scheduling_planning';
+    }
+    if (
+      input.route === 'web_lookup' ||
+      input.route === 'browser_operation'
+    ) {
+      return 'web_browser';
+    }
+    if (this.isMemoryAssistedPrompt(input.req.prompt)) {
+      return 'memory_assisted';
+    }
+    return 'conversational';
+  }
+
   private shouldUseToolLoop(
-    req: RuntimeRequest,
+    turnMode: TurnMode,
     input: {
       webEnabled: boolean;
       browserEnabled: boolean;
@@ -678,12 +1026,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       metaToolsPresent: boolean;
     },
   ): boolean {
-    const route = this.effectiveCapabilityRoute(req);
-    if (route === 'deny_or_escalate') return false;
-    if (route === 'plain_response') return input.safeToolsPresent;
-    if (input.browserEnabled) return true;
-    if (input.webEnabled) return true;
-    return input.metaToolsPresent;
+    if (turnMode === 'conversational') return input.safeToolsPresent;
+    if (turnMode === 'memory_assisted') return input.safeToolsPresent;
+    if (turnMode === 'web_browser') {
+      return input.browserEnabled || input.webEnabled || input.metaToolsPresent;
+    }
+    return input.metaToolsPresent || input.safeToolsPresent;
   }
 
   private isExplicitPlanningRequest(prompt: string): boolean {
@@ -694,6 +1042,19 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
   }
 
   private classifySchedulingMode(prompt: string): SchedulingMode {
+    // Scheduled task executions and heartbeat checks must never be classified
+    // as scheduling turns — their prompts contain time phrases from the
+    // original user request which would otherwise trigger scheduling mode,
+    // causing activeToolsForTurn to return an empty tools array and
+    // tool_choice: required to be sent with no tools → HTTP 400.
+    const trimmed = prompt.trimStart();
+    if (
+      /^\[SCHEDULED TASK EXECUTION/i.test(trimmed) ||
+      /^\[HEARTBEAT CHECK/i.test(trimmed)
+    ) {
+      return 'none';
+    }
+
     const current = this.currentTurnPrompt(prompt).toLowerCase();
     const taskCue =
       /\b(remind|send|check|read|look up|lookup|watch|monitor|notify|message|summarize|summary)\b/.test(current);
@@ -884,34 +1245,75 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
   private webConfig(req: RuntimeRequest): ToolExecutionContext {
     const webPolicy = req.config.toolPolicy?.web;
+    const cfgBaseUrl =
+      req.config.baseUrl || req.secrets?.OPENAI_BASE_URL || '';
+    const isCloud = !this.isLikelyLocalBaseUrl(cfgBaseUrl);
+    const isTask = req.config.toolPolicy?.isScheduledTask === true;
+    const defaultMaxSearchCalls = isTask
+      ? isCloud
+        ? 6
+        : 4
+      : isCloud
+        ? 4
+        : 2;
+    const defaultMaxToolSteps = isTask
+      ? isCloud
+        ? 14
+        : 12
+      : isCloud
+        ? 8
+        : 6;
+    const defaultSearchTimeoutMs = isCloud ? 10_000 : 6_000;
+    const defaultPageFetchTimeoutMs = isCloud ? 12_000 : 8_000;
+    const defaultTotalWebBudgetMs = isTask
+      ? isCloud
+        ? 90_000
+        : 60_000
+      : isCloud
+        ? 45_000
+        : 30_000;
     return {
       secrets: req.secrets,
       maxSearchCallsPerTurn: this.parsePositiveInt(
         webPolicy?.maxSearchCalls?.toString() ||
           req.secrets?.WEB_TOOL_MAX_SEARCH_CALLS,
-        2,
+        defaultMaxSearchCalls,
       ),
       maxToolSteps: this.parsePositiveInt(
         webPolicy?.maxSteps?.toString() || req.secrets?.WEB_TOOL_MAX_STEPS,
-        6,
+        defaultMaxToolSteps,
       ),
       searchTimeoutMs: this.parsePositiveInt(
         req.secrets?.WEB_TOOL_SEARCH_TIMEOUT_MS,
-        6000,
+        defaultSearchTimeoutMs,
       ),
       pageFetchTimeoutMs: this.parsePositiveInt(
         req.secrets?.WEB_TOOL_PAGE_FETCH_TIMEOUT_MS,
-        8000,
+        defaultPageFetchTimeoutMs,
       ),
       totalWebBudgetMs: this.parsePositiveInt(
         webPolicy?.totalBudgetMs?.toString() ||
           req.secrets?.WEB_TOOL_TOTAL_BUDGET_MS,
-        30000,
+        defaultTotalWebBudgetMs,
       ),
       startedAtMs: Date.now(),
       stepCount: 0,
       searchCount: 0,
     };
+  }
+
+  private resolveCloudToolLoopMaxTokens(input: {
+    route: string;
+    sawToolCalls: boolean;
+    maxOutputTokens: number;
+  }): number {
+    if (input.route === 'plain_response' && !input.sawToolCalls) {
+      return input.maxOutputTokens;
+    }
+    return Math.min(
+      input.maxOutputTokens,
+      input.sawToolCalls ? 1600 : 900,
+    );
   }
 
   private browserConfig(req: RuntimeRequest): ToolExecutionContext {
@@ -1089,12 +1491,26 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         : input.schedulingMode === 'interval'
           ? 'schedule_interval_task'
           : 'schedule_once_task';
+    // Include current local time so the model knows the user's timezone
+    const nowLocal = new Date();
+    const localTimeStr = nowLocal.toLocaleString('en-US', {
+      timeZone: this.resolveTimezone(),
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    });
+    const tz = this.resolveTimezone();
+
     return [
       'This request is a scheduling turn.',
+      `Current local time: ${localTimeStr} (${tz}).`,
       'Do not answer the future task right now.',
       `Call ${scheduleTool} now.`,
       `The required schedule type for this request is "${scheduleType}".`,
-      'Pass the timing phrase naturally instead of inventing a rigid timestamp when possible.',
+      'IMPORTANT: Pass the timing phrase naturally (e.g. "today at 5 PM") in the "when"/"recurrence"/"every" field. Do NOT construct ISO timestamps with Z suffix.',
       'For one-time future work, use the field "when" with phrases like "today at 6 PM", "tomorrow at 9 AM", or "in 2 hours".',
       'For recurring calendar work, use the field "recurrence" with phrases like "every weekday at 8 AM".',
       'For elapsed interval work, use the field "every" with phrases like "every 5 minutes" or "every 2 hours".',
@@ -1265,21 +1681,43 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     return cleanAnswer;
   }
 
-  private webToolGuidance(route: RuntimeRequest['config']['capabilityRoute']): string {
+  private webToolGuidance(route: RuntimeRequest['config']['capabilityRoute'], opts?: { isScheduledTask?: boolean }): string {
+    // Include current local time for scheduling awareness
+    const nowLocal = new Date();
+    const tz = this.resolveTimezone();
+    let localTimeNote = '';
+    try {
+      const localTimeStr = nowLocal.toLocaleString('en-US', {
+        timeZone: tz,
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+      localTimeNote = `- Current local time: ${localTimeStr} (${tz}). All scheduled times are in this timezone.`;
+    } catch {
+      /* non-fatal if timezone is invalid */
+    }
+
     if (route === 'plain_response') {
       return [
         'Conversation policy:',
         '- Answer directly when no tool is needed.',
         '- Safe memory and scheduling tools may still be available on this turn.',
+        localTimeNote,
         '- Use schedule_once_task for one-time future times, schedule_recurring_task for recurring calendar times, and schedule_interval_task only for elapsed intervals.',
         '- Exact-time or recurring timed jobs include: "at 12 PM", "today at 6", "tomorrow morning", "in 2 hours", "every day at 9 AM", and "every weekday at noon".',
         '- Schedule mapping: use the once tool for one-time times like "at 12 PM today" or "tomorrow at 9" and pass the phrase in "when"; use the recurring tool for calendar patterns like "every weekday at 8 AM" and pass the phrase in "recurrence"; use the interval tool only for repeating elapsed intervals like "every 5 minutes" or "every 2 hours" and pass the phrase in "every".',
+        '- For scheduling, pass the timing phrase naturally (e.g. "today at 5 PM"). Do NOT construct ISO timestamps.',
         '- For those timed requests, do not do the task now and do not answer with the requested result now. Schedule it.',
         '- Use register_watch only for ongoing monitoring instructions such as "keep an eye on this", "watch for changes", or "notify me if X happens".',
         '- Do not use register_watch as a fallback when schedule_task fails. Report the scheduling problem instead.',
         '- Use remember_this only for durable user facts, preferences, or long-term project context.',
         '- Do not reach for web or browser work unless this turn explicitly allows it.',
-      ].join('\n');
+      ].filter(Boolean).join('\n');
     }
     if (route === 'browser_operation') {
       return [
@@ -1296,12 +1734,29 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         '- Do not ask the user to guide you through the site when the browser tools can do the work directly.',
       ].join('\n');
     }
+    // Scheduled task execution: focus on thorough research, not scheduling
+    if (opts?.isScheduledTask) {
+      return [
+        'Scheduled task execution policy:',
+        '- You are executing a pre-scheduled task. Do NOT reschedule, re-create, or discuss scheduling.',
+        '- You MUST use web_search to gather real, current information. Do at least 2 searches with different queries.',
+        '- After searching, use web_fetch to read the top 1-2 result pages for detailed content.',
+        '- Synthesize the information into a comprehensive, well-structured response.',
+        '- Use bullet points or numbered lists. Include specific names, dates, numbers, and facts.',
+        '- Include source URLs so the user can read more.',
+        '- Never return a single vague sentence. Aim for a thorough briefing the user will find genuinely useful.',
+        '- Do NOT say "I will search" or "Let me look this up" — just call the tools and deliver the answer.',
+      ].join('\n');
+    }
+
     return [
       'Web lookup policy:',
       '- You have web tools for this turn because the task needs live or external information.',
+      localTimeNote,
       '- If the user asks you to do that live/external work at a future time or on a recurring schedule, do not do it now. Use the correct scheduling tool instead.',
       '- Exact-time examples: "at 12 PM", "today at 6", "tomorrow at 9", "in 30 minutes", "every weekday at 8 AM".',
       '- Schedule mapping: use schedule_once_task for one-time times and pass the phrase in "when"; use schedule_recurring_task for recurring calendar times and pass the phrase in "recurrence"; use schedule_interval_task only for repeated elapsed intervals like "every 5 minutes" and pass the phrase in "every".',
+      '- For scheduling, pass the timing phrase naturally (e.g. "today at 5 PM"). Do NOT construct ISO timestamps.',
       '- For those timed requests, do not answer with current search results now.',
       '- If the user asks you to keep watching something over time and notify only when it matters, call register_watch instead of doing a one-off lookup now.',
       '- Do not call register_watch for a fixed-time reminder or a timed recurring job.',
@@ -1309,7 +1764,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       '- Use web_fetch when you have a URL or a search result to read.',
       '- Use browser tools only on browser-operation turns, not on web-lookup turns.',
       '- Base the final answer on fetched page content or structured search results, never raw search engine chrome.',
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
 
   private looksLikeContextRefusal(text: string): boolean {
@@ -1370,34 +1825,39 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     requestTimeoutMs: number;
     maxOutputTokens: number;
     reason: string;
+    usage?: UsageAccumulator;
   }): Promise<string> {
     try {
+      const requestBody = {
+        model: input.model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Web retrieval is unavailable or low-quality. Give a direct best-effort answer from model knowledge. Do not say you cannot answer from provided context. If uncertain, state uncertainty briefly.',
+          },
+          {
+            role: 'user',
+            content: this.prepareUserPrompt(
+              `Question: ${input.userQuery}\n\nWeb issue: ${input.reason}\n\nProvide the most useful best-effort answer now.`,
+              input.model,
+            ),
+          },
+        ],
+        max_tokens: Math.min(input.maxOutputTokens, 800),
+      };
       const payload = (await postJson(
         `${input.baseUrl.replace(/\/$/, '')}/chat/completions`,
-        {
-          model: input.model,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'Web retrieval is unavailable or low-quality. Give a direct best-effort answer from model knowledge. Do not say you cannot answer from provided context. If uncertain, state uncertainty briefly.',
-            },
-            {
-              role: 'user',
-              content: this.prepareUserPrompt(
-                `Question: ${input.userQuery}\n\nWeb issue: ${input.reason}\n\nProvide the most useful best-effort answer now.`,
-                input.model,
-              ),
-            },
-          ],
-          max_tokens: Math.min(input.maxOutputTokens, 260),
-        },
+        requestBody,
         input.authHeaders,
         Math.min(input.requestTimeoutMs, 15_000),
       )) as {
         choices?: Array<{ message?: { content?: string } }>;
       };
       const text = payload.choices?.[0]?.message?.content?.trim() || '';
+      if (input.usage) {
+        this.recordUsage(input.usage, payload, requestBody, text);
+      }
       const visible = visibleText(text);
       if (visible) return visible;
     } catch {
@@ -1413,9 +1873,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     authHeaders: Record<string, string>;
     requestTimeoutMs: number;
     maxOutputTokens: number;
+    usage?: UsageAccumulator;
+    onPartialText?: RuntimeRequest['onPartialText'];
   }): Promise<string | null> {
     const followUpPrompt = this.prepareUserPrompt(
-      'Summarize the completed tool results for the user in 2-4 sentences. If the task is incomplete, clearly state what page or step was reached and what blocked further progress. Do not mention hidden reasoning.',
+      'Synthesize the completed tool results into a clear, comprehensive response for the user. Include the important findings, details, and conclusions. If the task is incomplete, clearly state what was reached and what blocked further progress. Do not mention hidden reasoning.',
       input.model,
     );
     const recentMessages = input.messages
@@ -1423,30 +1885,53 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       .slice(-8);
 
     try {
+      const requestBody = {
+        model: input.model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are finalizing a completed tool-assisted turn. Answer directly from the recent tool results. Do not call tools. Do not emit hidden reasoning.',
+          },
+          ...recentMessages,
+          {
+            role: 'user',
+            content: followUpPrompt,
+          },
+        ],
+        max_tokens: Math.min(input.maxOutputTokens, 1800),
+      };
+      if (input.onPartialText) {
+        let sawPartial = false;
+        try {
+          const streamed = await this.streamChatCompletion({
+            baseUrl: input.baseUrl,
+            authHeaders: input.authHeaders,
+            requestTimeoutMs: Math.min(input.requestTimeoutMs, 20_000),
+            requestBody,
+            usage: input.usage || this.createUsageAccumulator(),
+            onPartialText: async (text) => {
+              sawPartial = true;
+              await input.onPartialText?.(text);
+            },
+          });
+          return streamed || null;
+        } catch (err) {
+          if (sawPartial) throw err;
+        }
+      }
       const payload = (await postJson(
         `${input.baseUrl.replace(/\/$/, '')}/chat/completions`,
-        {
-          model: input.model,
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are finalizing a completed tool-assisted turn. Answer directly from the recent tool results. Do not call tools. Do not emit hidden reasoning.',
-            },
-            ...recentMessages,
-            {
-              role: 'user',
-              content: followUpPrompt,
-            },
-          ],
-          max_tokens: Math.min(input.maxOutputTokens, 500),
-        },
+        requestBody,
         input.authHeaders,
         Math.min(input.requestTimeoutMs, 20_000),
       )) as {
         choices?: Array<{ message?: { content?: string } }>;
       };
       const text = payload.choices?.[0]?.message?.content || '';
+      if (input.usage) {
+        this.recordUsage(input.usage, payload, requestBody, text);
+      }
       const visible = visibleText(text);
       return visible || null;
     } catch {
@@ -1486,6 +1971,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     authHeaders: Record<string, string>;
     requestTimeoutMs: number;
     maxOutputTokens: number;
+    usage?: UsageAccumulator;
   }): Promise<string> {
     try {
       const searchQuery = this.normalizeWebQuery(input.req.prompt);
@@ -1497,7 +1983,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       if (!prefetch.ok) {
         const reason = prefetch.content.replace(/\s+/g, ' ').trim().slice(0, 180);
         if (
-          /no structured results|duckduckgo|search engine|error page|context/i.test(
+          /no structured results|no search results|search failed|duckduckgo|search engine|error page|context|budget exhausted/i.test(
             reason.toLowerCase(),
           )
         ) {
@@ -1509,6 +1995,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             requestTimeoutMs: input.requestTimeoutMs,
             maxOutputTokens: input.maxOutputTokens,
             reason,
+            usage: input.usage,
           });
         }
         return `Live web lookup failed: ${reason || 'temporary tool error'}.`;
@@ -1519,26 +2006,27 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       this.saveSources(searchQuery, extractedSources);
       const fallbackSummary = this.buildWebFallbackSummary(prefetch.content);
       try {
+        const requestBody = {
+          model: input.model,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Use the provided web context to answer factually and concisely. Return a clean final answer (no XML).',
+            },
+            {
+              role: 'user',
+              content: this.prepareUserPrompt(
+                `User request:\n${searchQuery}\n\nWeb context:\n${webContext}\n\nAnswer using this context.`,
+                input.model,
+              ),
+            },
+          ],
+          max_tokens: input.maxOutputTokens,
+        };
         const payload = (await postJson(
           `${input.baseUrl.replace(/\/$/, '')}/chat/completions`,
-          {
-            model: input.model,
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'Use the provided web context to answer factually and concisely. Return a clean final answer (no XML).',
-              },
-              {
-                role: 'user',
-                content: this.prepareUserPrompt(
-                  `User request:\n${searchQuery}\n\nWeb context:\n${webContext}\n\nAnswer using this context.`,
-                  input.model,
-                ),
-              },
-            ],
-            max_tokens: input.maxOutputTokens,
-          },
+          requestBody,
           input.authHeaders,
           input.requestTimeoutMs,
         )) as {
@@ -1546,6 +2034,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         };
 
         const text = payload.choices?.[0]?.message?.content?.trim() || '';
+        if (input.usage) {
+          this.recordUsage(input.usage, payload, requestBody, text);
+        }
         const visible = visibleText(text);
         if (!visible) {
           if (fallbackSummary) return stripThinkBlocks(fallbackSummary);
@@ -1557,6 +2048,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             requestTimeoutMs: input.requestTimeoutMs,
             maxOutputTokens: input.maxOutputTokens,
             reason: 'empty synthesis output',
+            usage: input.usage,
           });
         }
         if (this.looksLikeContextRefusal(text)) {
@@ -1568,6 +2060,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             requestTimeoutMs: input.requestTimeoutMs,
             maxOutputTokens: input.maxOutputTokens,
             reason: 'context-only refusal from synthesis',
+            usage: input.usage,
           });
         }
         return this.formatAnswerWithSources(visible, prefetch.content);
@@ -1581,6 +2074,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           requestTimeoutMs: input.requestTimeoutMs,
           maxOutputTokens: input.maxOutputTokens,
           reason: 'summarization failure',
+          usage: input.usage,
         });
       }
     } catch (err) {
@@ -1592,6 +2086,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
   async run(req: RuntimeRequest): Promise<RuntimeResponse> {
     const currentTurnPrompt = this.currentTurnPrompt(req.prompt);
+    const usage = this.createUsageAccumulator();
     req = {
       ...req,
       secrets: {
@@ -1612,6 +2107,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       req.config.baseUrl ||
       req.secrets?.OPENAI_BASE_URL ||
       'https://api.openai.com/v1';
+    const isLocal = this.isLikelyLocalBaseUrl(baseUrl);
 
     const apiKey = req.secrets?.OPENAI_API_KEY;
     const requiresApiKey = req.config.capabilities?.requiresApiKey === true;
@@ -1621,11 +2117,9 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       );
     }
 
-    const sanitizedSystemPrompt = this.sanitizeRuntimeSystemPrompt(req.systemPrompt);
-    const combinedInput = sanitizedSystemPrompt
-      ? `${sanitizedSystemPrompt}\n\n${req.prompt}`
-      : req.prompt;
-    const preparedCombinedInput = this.prepareUserPrompt(combinedInput, model);
+    const sanitizedSystemPrompt = isLocal
+      ? this.sanitizeRuntimeSystemPrompt(req.systemPrompt)
+      : this.sanitizeCloudRuntimeSystemPrompt(req.systemPrompt);
     const parsedTimeout = Number.parseInt(
       req.secrets?.OPENAI_REQUEST_TIMEOUT_MS || '',
       10,
@@ -1641,39 +2135,38 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     const maxOutputTokens =
       Number.isFinite(parsedMaxTokens) && parsedMaxTokens > 0
         ? parsedMaxTokens
-        : 1400;
+        : isLocal
+          ? 1400
+          : 4096;
+    const useStreaming = this.shouldUseStreaming(req, isLocal);
     const authHeaders: Record<string, string> = {};
     if (apiKey && apiKey.length > 0) {
       authHeaders.Authorization = `Bearer ${apiKey}`;
     }
+    const buildResponse = (result: string): RuntimeResponse => ({
+      result,
+      sessionId: makeSessionId('openai_compatible'),
+      usage: this.finalizeUsage(usage),
+    });
     const hasToolCapability =
       req.config.capabilities?.supportsTools !== false;
     const route = this.effectiveCapabilityRoute(req);
-    const inputBudgetChars = this.resolveInputBudgetChars({
-      req,
-      baseUrl,
-      maxOutputTokens,
-      toolsEnabled: hasToolCapability,
-    });
 
     if (route === 'deny_or_escalate') {
-      return {
-        result:
-          'That request needs a more privileged or longer-running browser workflow than this session allows right now. Please narrow the task or enable the required browser mode first.',
-        sessionId: makeSessionId('openai_compatible'),
-      };
+      return buildResponse(
+        'That request needs a more privileged or longer-running browser workflow than this session allows right now. Please narrow the task or enable the required browser mode first.',
+      );
     }
 
     if (this.isShowSourcesRequest(req.prompt)) {
       const stored = this.loadSources();
-          return {
-            result: stripThinkBlocks(
-              stored
+      return buildResponse(
+        stripThinkBlocks(
+          stored
           ? this.formatSourceDetailsReply(stored)
           : 'No recent web sources found for this chat yet. Ask a web question first, then use "show sources".',
-            ),
-        sessionId: makeSessionId('openai_compatible'),
-      };
+        ),
+      );
     }
 
     const { registry: baseRegistry, tools: baseTools, webEnabled, browserEnabled } = this.availableTools(req);
@@ -1708,6 +2201,17 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     );
     const registry = [...baseRegistry, ...plannerTools];
     const tools = [...baseTools, ...toOpenAITools(plannerTools)];
+    const turnMode = this.resolveTurnMode({
+      req,
+      route,
+      schedulingIntent,
+      watchIntent,
+      planningIntensity,
+    });
+    const toolSchemaChars =
+      hasToolCapability && tools.length > 0
+        ? JSON.stringify(tools).length
+        : 0;
 
     // Only force the tool loop for meta tools when there are also functional (non-meta) tools.
     // Without functional tools, entering the tool loop provides no execution capability.
@@ -1719,12 +2223,19 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     const shouldUseToolLoop =
       req.config.capabilities?.supportsTools !== false &&
       tools.length > 0 &&
-      this.shouldUseToolLoop(req, {
+      this.shouldUseToolLoop(turnMode, {
         webEnabled,
         browserEnabled,
         safeToolsPresent,
         metaToolsPresent,
       });
+    const inputBudgetChars = this.resolveInputBudgetChars({
+      req,
+      baseUrl,
+      maxOutputTokens,
+      toolSchemaChars: shouldUseToolLoop ? toolSchemaChars : 0,
+      turnMode,
+    });
 
     if (shouldUseToolLoop) {
       const usingBrowserFlow =
@@ -1741,9 +2252,10 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           ? `Resolved target URL for this turn: ${bootstrap.targetUrl}\nStart with browser_open_url for this URL unless the page proves it is incorrect.`
           : '';
       const plannerGuidance = this.plannerGuidance(planningIntensity);
+      const webGuidance = this.webToolGuidance(route, { isScheduledTask: req.config.toolPolicy?.isScheduledTask });
       const preparedSystemPrompt = sanitizedSystemPrompt
-        ? `${sanitizedSystemPrompt}\n\n${this.webToolGuidance(route)}${browserBootstrapNote ? `\n${browserBootstrapNote}` : ''}${plannerGuidance}`
-        : `${this.webToolGuidance(route)}${browserBootstrapNote ? `\n${browserBootstrapNote}` : ''}${plannerGuidance}`;
+        ? `${sanitizedSystemPrompt}\n\n${webGuidance}${browserBootstrapNote ? `\n${browserBootstrapNote}` : ''}${plannerGuidance}`
+        : `${webGuidance}${browserBootstrapNote ? `\n${browserBootstrapNote}` : ''}${plannerGuidance}`;
       const preparedUserPrompt = this.prepareUserPrompt(req.prompt, model, {
         allowNoThinkPrefix: route === 'plain_response',
       });
@@ -1751,6 +2263,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         systemPrompt: preparedSystemPrompt,
         userPrompt: preparedUserPrompt,
         budgetChars: inputBudgetChars,
+        systemBudgetRatio: isLocal ? 0.38 : 0.5,
       });
       console.error(
         `[openai-runtime] tool-policy=${JSON.stringify(req.config.toolPolicy || {})} tools=${registry.map((tool) => tool.name).join(',') || '-'}`,
@@ -1760,6 +2273,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           role: 'system',
           content: fittedPrompts.systemPrompt,
         });
+      }
+      // Inject prior conversation turns from warm session before the current user message.
+      // These are non-system messages (user + assistant + tool results) from previous turns.
+      if (req.priorMessages && req.priorMessages.length > 0) {
+        for (const msg of req.priorMessages) {
+          if (msg.role !== 'system') {
+            messages.push(msg as unknown as Record<string, unknown>);
+          }
+        }
       }
       messages.push({
         role: 'user',
@@ -1815,24 +2337,33 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               watchIntent,
             });
 
+            const requestBody = {
+              model,
+              messages,
+              tools: activeTools,
+              tool_choice: this.resolveToolChoice({
+                usingBrowserFlow,
+                sawToolCalls: sawToolCalls && schedulingResolved,
+                bootstrapUsed: bootstrapState.used,
+                prompt: req.prompt,
+                planningIntensity,
+                plannerState,
+                schedulingIntent,
+                watchIntent,
+              }),
+              max_tokens: isLocal
+                ? sawToolCalls
+                  ? Math.min(maxOutputTokens, 700)
+                  : Math.min(maxOutputTokens, 280)
+                : this.resolveCloudToolLoopMaxTokens({
+                    route,
+                    sawToolCalls,
+                    maxOutputTokens,
+                  }),
+            };
             const payload = (await postJson(
               `${baseUrl.replace(/\/$/, '')}/chat/completions`,
-              {
-                model,
-                messages,
-                tools: activeTools,
-                tool_choice: this.resolveToolChoice({
-                  usingBrowserFlow,
-                  sawToolCalls: sawToolCalls && schedulingResolved,
-                  bootstrapUsed: bootstrapState.used,
-                  prompt: req.prompt,
-                  planningIntensity,
-                  plannerState,
-                  schedulingIntent,
-                  watchIntent,
-                }),
-                max_tokens: sawToolCalls ? Math.min(maxOutputTokens, 700) : Math.min(maxOutputTokens, 280),
-              },
+              requestBody,
               authHeaders,
               perRequestTimeoutMs,
             )) as {
@@ -1850,6 +2381,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
             const choice = payload.choices?.[0]?.message;
             const content = choice?.content?.trim() || '';
+            this.recordUsage(usage, payload, requestBody, content);
             const toolCalls = choice?.tool_calls || [];
             if (content) lastAssistantContent = content;
             if (toolCalls.length === 0) {
@@ -2057,10 +2589,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
 
         const visibleAssistantContent = visibleText(lastAssistantContent);
         if (terminalSchedulingResult) {
-          return {
-            result: terminalSchedulingResult.content,
-            sessionId: makeSessionId('openai_compatible'),
-          };
+          return buildResponse(terminalSchedulingResult.content);
         }
         if (sawToolCalls && !visibleAssistantContent) {
           const synthesized = await this.runFinalToolSynthesis({
@@ -2070,19 +2599,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             authHeaders,
             requestTimeoutMs,
             maxOutputTokens,
+            usage,
+            onPartialText: req.onPartialText,
           });
           if (synthesized) {
-            return {
-              result: synthesized,
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(synthesized);
           }
           const latestToolSummary = this.latestToolContentSummary(messages);
           if (latestToolSummary) {
-            return {
-              result: latestToolSummary,
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(latestToolSummary);
           }
         }
         const explicitWebIntent =
@@ -2121,7 +2646,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             baseUrl,
             authHeaders,
             requestTimeoutMs: Math.min(requestTimeoutMs, 20_000),
-            maxOutputTokens: Math.min(maxOutputTokens, 280),
+            maxOutputTokens: Math.min(maxOutputTokens, 800),
+            usage,
           });
           if (this.looksLikeContextRefusal(prefetched)) {
             const rescue = await this.runBestEffortKnowledgeAnswer({
@@ -2132,16 +2658,11 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               requestTimeoutMs,
               maxOutputTokens,
               reason: 'final prefetch output matched refusal pattern',
+              usage,
             });
-            return {
-              result: rescue,
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(rescue);
           }
-          return {
-            result: stripThinkBlocks(prefetched),
-            sessionId: makeSessionId('openai_compatible'),
-          };
+          return buildResponse(stripThinkBlocks(prefetched));
         }
 
         if (lastAssistantContent) {
@@ -2160,19 +2681,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               '[openai-runtime] browser-operation turn completed without any tool calls',
             );
             if (this.looksLikeBrowserDeflection(lastAssistantContent)) {
-              return {
-                result:
-                  "I couldn't complete the browser task because the model never used the available browser tools after entering browser mode. Please retry.",
-                sessionId: makeSessionId('openai_compatible'),
-              };
+              return buildResponse(
+                "I couldn't complete the browser task because the model never used the available browser tools after entering browser mode. Please retry.",
+              );
             }
           }
           if ((schedulingIntent || watchIntent) && !sawToolCalls) {
-            return {
-              result:
-                "I couldn't schedule that yet because the model didn't use the scheduling tool on this turn. Please retry.",
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(
+              "I couldn't schedule that yet because the model didn't use the scheduling tool on this turn. Please retry.",
+            );
           }
           if (this.looksLikeContextRefusal(lastAssistantContent)) {
             const rescue = await this.runBestEffortKnowledgeAnswer({
@@ -2183,22 +2700,16 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               requestTimeoutMs,
               maxOutputTokens,
               reason: 'tool-loop assistant output matched refusal pattern',
+              usage,
             });
-            return {
-              result: rescue,
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(rescue);
           }
-          return {
-            result: visibleAssistantContent,
-            sessionId: makeSessionId('openai_compatible'),
-          };
+          return buildResponse(visibleAssistantContent);
         }
 
-        return {
-          result: "I couldn't get a final model response in time. Please retry.",
-          sessionId: makeSessionId('openai_compatible'),
-        };
+        return buildResponse(
+          "I couldn't get a final model response in time. Please retry.",
+        );
       } finally {
         await closeBrowserSessionFromContext(toolCtx).catch(() => undefined);
         await closeWebSessionFromContext(toolCtx).catch(() => undefined);
@@ -2206,31 +2717,48 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
 
     try {
-      const supportsResponses = req.config.capabilities?.supportsResponses !== false;
+      const supportsResponses =
+        req.config.capabilities?.supportsResponses !== false && !useStreaming;
+      const preparedSimpleUserPrompt = this.prepareUserPrompt(req.prompt, model, {
+        allowNoThinkPrefix: route === 'plain_response',
+      });
       const fittedSimplePrompts = this.fitPromptPairWithinBudget({
-        systemPrompt: undefined,
-        userPrompt: preparedCombinedInput,
+        systemPrompt: sanitizedSystemPrompt,
+        userPrompt: preparedSimpleUserPrompt,
         budgetChars: inputBudgetChars,
+        systemBudgetRatio:
+          turnMode === 'conversational'
+            ? isLocal
+              ? 0.34
+              : 0.42
+            : isLocal
+              ? 0.38
+              : 0.5,
       });
       if (supportsResponses) {
         try {
+          const requestBody = fittedSimplePrompts.systemPrompt
+            ? {
+                model,
+                instructions: fittedSimplePrompts.systemPrompt,
+                input: fittedSimplePrompts.userPrompt,
+              }
+            : {
+                model,
+                input: fittedSimplePrompts.userPrompt,
+              };
           const response = await postJson(
             `${baseUrl.replace(/\/$/, '')}/responses`,
-            {
-              model,
-              input: fittedSimplePrompts.userPrompt,
-            },
+            requestBody,
             authHeaders,
             requestTimeoutMs,
           );
 
           const text = extractOpenAIText(response);
+          this.recordUsage(usage, response, requestBody, text);
           const visible = visibleText(text);
           if (visible) {
-            return {
-              result: visible,
-              sessionId: makeSessionId('openai_compatible'),
-            };
+            return buildResponse(visible);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -2239,13 +2767,46 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         }
       }
 
+      const priorNonSystemMessages = (req.priorMessages || [])
+        .filter((m) => m.role !== 'system');
+      const chatRequestBody = {
+        model,
+        messages: [
+          ...(fittedSimplePrompts.systemPrompt
+            ? [{ role: 'system', content: fittedSimplePrompts.systemPrompt }]
+            : []),
+          ...priorNonSystemMessages,
+          { role: 'user', content: fittedSimplePrompts.userPrompt },
+        ],
+        max_tokens: maxOutputTokens,
+      };
+      if (useStreaming) {
+        let sawPartial = false;
+        try {
+          const streamedText = await this.streamChatCompletion({
+            baseUrl,
+            authHeaders,
+            requestTimeoutMs,
+            requestBody: chatRequestBody,
+            usage,
+            onPartialText: async (text) => {
+              sawPartial = true;
+              await req.onPartialText?.(text);
+            },
+          });
+          if (!streamedText) {
+            throw new Error(
+              'OpenAI-compatible runtime returned no text output from streaming chat completions',
+            );
+          }
+          return buildResponse(streamedText);
+        } catch (err) {
+          if (sawPartial) throw err;
+        }
+      }
       const chatPayload = (await postJson(
         `${baseUrl.replace(/\/$/, '')}/chat/completions`,
-        {
-          model,
-          messages: [{ role: 'user', content: fittedSimplePrompts.userPrompt }],
-          max_tokens: maxOutputTokens,
-        },
+        chatRequestBody,
         authHeaders,
         requestTimeoutMs,
       )) as {
@@ -2253,6 +2814,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       };
 
       const chatText = chatPayload.choices?.[0]?.message?.content?.trim() || '';
+      this.recordUsage(usage, chatPayload, chatRequestBody, chatText);
       const visibleChatText = visibleText(chatText);
       if (!visibleChatText) {
         throw new Error(
@@ -2260,10 +2822,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         );
       }
 
-      return {
-        result: visibleChatText,
-        sessionId: makeSessionId('openai_compatible'),
-      };
+      return buildResponse(visibleChatText);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (this.looksLikeTransientRuntimeError(message)) {

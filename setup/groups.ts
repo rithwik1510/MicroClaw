@@ -67,8 +67,7 @@ async function syncGroups(projectRoot: string): Promise<void> {
   // Only WhatsApp needs an upfront group sync; other channels resolve names at runtime.
   // Detect WhatsApp by checking for auth credentials on disk.
   const authDir = path.join(projectRoot, 'store', 'auth');
-  const hasWhatsAppAuth =
-    fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
+  const hasWhatsAppAuth = fs.existsSync(path.join(authDir, 'creds.json'));
 
   if (!hasWhatsAppAuth) {
     logger.info('WhatsApp auth not found — skipping group sync');

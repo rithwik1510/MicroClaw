@@ -505,11 +505,28 @@ export function buildToolRegistry(): ToolHandler[] {
   ];
 }
 
+/** Tool names that should never appear during heartbeat runs. */
+const HEARTBEAT_BLOCKED_TOOLS = new Set([
+  'schedule_task',
+  'schedule_once_task',
+  'schedule_recurring_task',
+  'schedule_interval_task',
+  'register_watch',
+]);
+
 export function filterToolRegistry(
   registry: ToolHandler[],
   toolPolicy: RuntimeToolPolicy | undefined,
 ): ToolHandler[] {
   return registry.filter((tool) => {
+    // During heartbeat or scheduled task execution, block scheduling/watch
+    // tools so the model cannot create new tasks or re-schedule itself.
+    if (
+      (toolPolicy?.isHeartbeat || toolPolicy?.isScheduledTask) &&
+      HEARTBEAT_BLOCKED_TOOLS.has(tool.name)
+    ) {
+      return false;
+    }
     if (tool.family === 'meta' || tool.family === 'memory') return true;
     const familyPolicy =
       tool.family === 'web'

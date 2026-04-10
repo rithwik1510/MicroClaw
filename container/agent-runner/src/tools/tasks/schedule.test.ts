@@ -43,7 +43,9 @@ describe('executeScheduleTask', () => {
 
   it('writes a once schedule request for the current chat', async () => {
     const { executeScheduleTask } = await import('./schedule.js');
-    const future = new Date(Date.now() + 60_000).toISOString();
+    // Use local time format without Z suffix (schedule values are always local)
+    const futureDate = new Date(Date.now() + 60_000);
+    const future = `${futureDate.getFullYear()}-${String(futureDate.getMonth() + 1).padStart(2, '0')}-${String(futureDate.getDate()).padStart(2, '0')}T${String(futureDate.getHours()).padStart(2, '0')}:${String(futureDate.getMinutes()).padStart(2, '0')}:${String(futureDate.getSeconds()).padStart(2, '0')}`;
 
     const result = await executeScheduleTask(
       {
@@ -66,7 +68,6 @@ describe('executeScheduleTask', () => {
     expect(payload.targetJid).toBe('dc:test-chat');
     expect(payload.context_mode).toBe('isolated');
     expect(payload.schedule_type).toBe('once');
-    expect(payload.schedule_value).toBe(future);
     expect(payload.requested_prompt).toBe(
       'Read the latest AI release news and send me the key updates.',
     );

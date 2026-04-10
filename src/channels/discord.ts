@@ -13,6 +13,7 @@ import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  ChannelMessageRef,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -361,10 +362,13 @@ export class DiscordChannel implements Channel {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
+  async sendMessage(
+    jid: string,
+    text: string,
+  ): Promise<ChannelMessageRef | null> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
-      return;
+      return null;
     }
 
     try {
@@ -373,23 +377,54 @@ export class DiscordChannel implements Channel {
 
       if (!channel || !('send' in channel)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
-        return;
+        return null;
       }
 
       const textChannel = channel as TextChannel;
 
       // Discord has a 2000 character limit per message — split if needed
       const chunks = splitDiscordMessage(text, 2000);
+      let firstMessage: Message | null = null;
       for (const chunk of chunks) {
-        await textChannel.send(chunk);
+        const sent = await textChannel.send(chunk);
+        firstMessage ||= sent;
       }
       logger.info(
         { jid, length: text.length, chunkCount: chunks.length },
         'Discord message sent',
       );
+      return firstMessage ? { id: firstMessage.id, jid } : null;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+      return null;
     }
+  }
+
+  async updateMessage(
+    jid: string,
+    ref: ChannelMessageRef,
+    text: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    if (text.length > 2000) {
+      throw new Error('Discord message edit exceeds 2000 characters');
+    }
+    const channelId = jid.replace(/^dc:/, '');
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !('messages' in channel)) {
+      throw new Error('Discord channel not found for message edit');
+    }
+    const message = await (channel as TextChannel).messages.fetch(ref.id);
+    await message.edit(text);
+  }
+
+  async deleteMessage(jid: string, ref: ChannelMessageRef): Promise<void> {
+    if (!this.client) return;
+    const channelId = jid.replace(/^dc:/, '');
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !('messages' in channel)) return;
+    const message = await (channel as TextChannel).messages.fetch(ref.id);
+    await message.delete().catch(() => undefined);
   }
 
   isConnected(): boolean {

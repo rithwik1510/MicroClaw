@@ -8,7 +8,13 @@ import {
   readSecretsForAgent,
   runContainerAgent,
 } from '../container-runner.js';
-import { CONTAINER_MAX_OUTPUT_SIZE, TIMEZONE } from '../config.js';
+import {
+  CONTAINER_MAX_OUTPUT_SIZE,
+  IDLE_TIMEOUT,
+  OPENAI_WARM_SESSIONS,
+  OPENAI_SESSION_IDLE_TIMEOUT_MS,
+  TIMEZONE,
+} from '../config.js';
 import { ensureContainerRuntimeRunning } from '../container-runtime.js';
 import { readEnvFile } from '../env.js';
 import {
@@ -22,7 +28,10 @@ const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 const DEFAULT_NATIVE_AGENT_TIMEOUT_MS = 180_000;
 const MIN_NATIVE_AGENT_TIMEOUT_MS = 30_000;
-const backendEnv = readEnvFile(['NATIVE_AGENT_TIMEOUT_MS']);
+const backendEnv = readEnvFile([
+  'NATIVE_AGENT_TIMEOUT_MS',
+  'NANOCLAW_AGENT_IPC_POLL_MS',
+]);
 
 export interface AgentRunnerCallbacks {
   onProcess: (proc: ChildProcess, containerName: string) => void;
@@ -119,6 +128,15 @@ function normalizeInputForNative(input: ContainerInput): ContainerInput {
   }
   return {
     ...input,
+    // OpenAI-compatible providers support warm session reuse when OPENAI_WARM_SESSIONS is enabled.
+    // The adapter is stateless (all mutable state scoped to each run() call), so no state leaks
+    // between turns. When warm sessions are disabled, singleTurn=true forces stateless mode.
+    singleTurn:
+      input.singleTurn ??
+      (input.runtimeConfig?.provider === 'openai_compatible' &&
+      !OPENAI_WARM_SESSIONS
+        ? true
+        : undefined),
     runtimeConfig,
     secrets,
   };
@@ -135,6 +153,10 @@ function buildNativeRunnerEnv(group: RegisteredGroup): Record<string, string> {
     NANOCLAW_GROUP_WORKSPACE_DIR: groupWorkspaceDir,
     NANOCLAW_GROUP_FOLDER: group.folder,
     NANOCLAW_TIMEZONE: TIMEZONE,
+    NANOCLAW_AGENT_IPC_POLL_MS:
+      process.env.NANOCLAW_AGENT_IPC_POLL_MS ||
+      backendEnv.NANOCLAW_AGENT_IPC_POLL_MS ||
+      '200',
   } as Record<string, string>;
 }
 
@@ -204,12 +226,23 @@ async function runNativeAgent(
         : DEFAULT_NATIVE_AGENT_TIMEOUT_MS;
     // Native mode should fail fast on stuck calls; keep this independent from
     // long idle container lifetimes used by docker mode.
+    // For warm OpenAI sessions use OPENAI_SESSION_IDLE_TIMEOUT_MS + buffer instead of
+    // the full 30-minute IDLE_TIMEOUT, so the process doesn't linger unnecessarily.
+    const openaiIdleBudgetMs = OPENAI_WARM_SESSIONS
+      ? OPENAI_SESSION_IDLE_TIMEOUT_MS + 30_000
+      : IDLE_TIMEOUT + 30_000;
     const timeoutMs = Math.max(
       MIN_NATIVE_AGENT_TIMEOUT_MS,
-      Math.min(
-        group.containerConfig?.timeout || configuredNativeTimeout,
-        configuredNativeTimeout,
-      ),
+      input.runtimeConfig?.provider === 'openai_compatible'
+        ? Math.max(
+            group.containerConfig?.timeout || configuredNativeTimeout,
+            configuredNativeTimeout,
+            openaiIdleBudgetMs,
+          )
+        : Math.min(
+            group.containerConfig?.timeout || configuredNativeTimeout,
+            configuredNativeTimeout,
+          ),
     );
     let timeout = setTimeout(() => {
       timedOut = true;
@@ -253,12 +286,12 @@ async function runNativeAgent(
         try {
           const parsed = JSON.parse(jsonStr) as ContainerOutput;
           if (parsed.newSessionId) newSessionId = parsed.newSessionId;
+          resetTimeout();
           const hasMeaningfulText =
             typeof parsed.result === 'string' &&
             parsed.result.trim().length > 0;
           if (hasMeaningfulText) {
             hadStreamingOutput = true;
-            resetTimeout();
           }
           outputChain = outputChain.then(() => callbacks.onOutput!(parsed));
         } catch (err) {

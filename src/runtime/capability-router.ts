@@ -100,7 +100,13 @@ export function resolveCapabilityRoute(input: {
     return 'plain_response';
   }
 
-  if (hasFutureOrRecurringTaskRequest(current)) {
+  // Skip future-task detection for scheduled task executions — the execution
+  // prompt carries the original user request which often contains time phrases,
+  // but the task is already running now and needs its actual tools (web, etc.).
+  if (
+    !input.toolPolicy?.isScheduledTask &&
+    hasFutureOrRecurringTaskRequest(current)
+  ) {
     return 'plain_response';
   }
 

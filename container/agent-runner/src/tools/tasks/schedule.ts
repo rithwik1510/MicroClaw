@@ -47,6 +47,13 @@ function normalizeContextMode(value: unknown): ContextMode {
 }
 
 function getCurrentTime(ctx: ToolExecutionContext): Date {
+  // Set process.env.TZ so all Date methods (setHours, getHours, etc.)
+  // operate in the user's timezone, not the system/container default.
+  const tz = ctx.secrets?.NANOCLAW_TIMEZONE;
+  if (typeof tz === 'string' && tz.trim() && process.env.TZ !== tz) {
+    process.env.TZ = tz;
+  }
+
   const hinted = ctx.secrets?.NANOCLAW_CURRENT_TIME_ISO;
   if (typeof hinted === 'string' && hinted.trim()) {
     const parsed = new Date(hinted);
@@ -227,6 +234,29 @@ function formatScheduleSummary(
 function parseOnceDateTime(raw: string, now: Date): Date | null {
   const normalized = raw.replace(/\s+/g, ' ').trim();
   if (!normalized) return null;
+
+  // If the model passed an ISO timestamp with Z suffix or timezone offset
+  // (e.g. "2026-03-15T17:23:00.000Z" or "2026-03-15T17:23:00.000+05:30"),
+  // strip the timezone and re-parse as local time. Schedule values are always
+  // meant to be local time (matching the MCP path which rejects Z suffixes).
+  const isoWithTz = normalized.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)[Zz]$/,
+  );
+  if (isoWithTz) {
+    const localDate = new Date(isoWithTz[1]);
+    if (!Number.isNaN(localDate.getTime())) {
+      return localDate;
+    }
+  }
+  const isoWithOffset = normalized.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)[+-]\d{2}:\d{2}$/,
+  );
+  if (isoWithOffset) {
+    const localDate = new Date(isoWithOffset[1]);
+    if (!Number.isNaN(localDate.getTime())) {
+      return localDate;
+    }
+  }
 
   const directDate = new Date(normalized);
   if (!Number.isNaN(directDate.getTime())) {

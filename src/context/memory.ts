@@ -18,6 +18,52 @@ const MEMORY_SECTION_ORDER: Array<MemoryCandidate['kind']> = [
   'proj',
   'loop',
 ];
+const MAX_PINNED_CORE_ENTRIES = 5;
+
+function looksTransientInstruction(text: string): boolean {
+  return /\b(today|right now|just now|this task|this chat|dont do a search|do not search|no search|what should i do there|explain me what i need to do)\b/i.test(
+    text,
+  );
+}
+
+function looksQuestionLikeMemory(text: string): boolean {
+  return (
+    text.includes('?') ||
+    /^(what|why|how|should i|can you|is it|where|when|which)\b/i.test(text)
+  );
+}
+
+function isUsefulMemoryText(
+  kind: MemoryCandidate['kind'],
+  text: string,
+): boolean {
+  const normalized = normalizeLine(text);
+  if (normalized.length < 12) return false;
+  if (/^https?:\/\//i.test(normalized)) return false;
+  if (looksTransientInstruction(normalized)) return false;
+  if (looksQuestionLikeMemory(normalized)) return false;
+  if (
+    /\b(hello|hi|thanks|thank you|okay|ok|cool|nice|great)\b/i.test(
+      normalized,
+    ) &&
+    normalized.length < 40
+  ) {
+    return false;
+  }
+  if (
+    /\b(for suppose|suppose i am using|nothing about specific project today|best books to read)\b/i.test(
+      normalized,
+    )
+  ) {
+    return false;
+  }
+  if (kind === 'loop') {
+    return /\b(follow up|revisit|remember|next|pending|open)\b/i.test(
+      normalized,
+    );
+  }
+  return true;
+}
 
 function normalizeLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -27,29 +73,105 @@ function ensureDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function classifyUserMessage(content: string): MemoryCandidate['kind'] | null {
+function isQuestionLike(content: string): boolean {
   const lower = content.toLowerCase();
+  return (
+    content.includes('?') ||
+    /^(what|why|how|can you|should i|do i need|is it okay|which|where|when)\b/.test(
+      lower,
+    )
+  );
+}
+
+function isExplicitMemoryRequest(content: string): boolean {
+  return /\b(remember this|remember that|keep this in (your )?memory|never forget|always remember|from now on)\b/i.test(
+    content,
+  );
+}
+
+function classifyUserMessage(content: string): {
+  kind: MemoryCandidate['kind'];
+  origin: MemoryCandidate['origin'];
+  durability: MemoryCandidate['durability'];
+  confidence: number;
+} | null {
+  const lower = content.toLowerCase();
+  if (isQuestionLike(content) && !isExplicitMemoryRequest(content)) {
+    return null;
+  }
+  if (isExplicitMemoryRequest(content)) {
+    const pinned =
+      /\b(always remember|never forget|critical|important to remember)\b/i.test(
+        content,
+      );
+    const kind =
+      /\b(prefer|please be|keep replies|tone|format|call me|my name is)\b/i.test(
+        content,
+      )
+        ? 'pref'
+        : /\b(project|repo|app|constraint|deadline|roadmap|building)\b/i.test(
+              content,
+            )
+          ? 'proj'
+          : /\b(todo|follow up|later|next|remind)\b/i.test(content)
+            ? 'loop'
+            : 'fact';
+    return {
+      kind,
+      origin: 'explicit_request',
+      durability: pinned ? 'pinned' : 'durable',
+      confidence: pinned ? 0.98 : 0.95,
+    };
+  }
   if (
     /\b(i prefer|prefer |please be |please keep |keep replies|be concise|be brief|call me|my name is)\b/.test(
       lower,
     )
   ) {
-    return 'pref';
+    return {
+      kind: 'pref',
+      origin: 'auto_capture',
+      durability: 'durable',
+      confidence: 0.88,
+    };
   }
   if (
-    /\b(project|repo|app|assistant|nanoclaw|openclaw|constraint|deadline|roadmap|we are building)\b/.test(
+    /\b(project|repo|app|constraint|deadline|roadmap|we are building|tech stack|working on nanoclaw|working on microclaw)\b/.test(
+      lower,
+    ) &&
+    !/\b(today|right now|just for now|for this task|for this chat)\b/.test(
       lower,
     )
   ) {
-    return 'proj';
-  }
-  if (/\b(todo|follow up|need to|later|remind|next)\b/.test(lower)) {
-    return 'loop';
+    return {
+      kind: 'proj',
+      origin: 'auto_capture',
+      durability: 'durable',
+      confidence: 0.84,
+    };
   }
   if (
-    /\b(i am|i'm|i use|i work|i live|i want|i need|remember that)\b/.test(lower)
+    /\b(todo|follow up|later|remind me|next step|need to revisit)\b/.test(lower)
   ) {
-    return 'fact';
+    return {
+      kind: 'loop',
+      origin: 'auto_capture',
+      durability: 'session',
+      confidence: 0.72,
+    };
+  }
+  if (
+    /\b(i am|i'm|i use|i work|i live|i started|i will start|my timezone|my role|working from)\b/.test(
+      lower,
+    ) &&
+    !/\b(i want|i need|i hope|i wish|i feel)\b/.test(lower)
+  ) {
+    return {
+      kind: 'fact',
+      origin: 'auto_capture',
+      durability: 'durable',
+      confidence: 0.82,
+    };
   }
   return null;
 }
@@ -81,13 +203,17 @@ export function extractMemoryCandidates(
     ) {
       continue;
     }
-    const kind = classifyUserMessage(normalized);
-    if (!kind) continue;
+    const classification = classifyUserMessage(normalized);
+    if (!classification) continue;
+    if (!isUsefulMemoryText(classification.kind, normalized)) continue;
     candidates.push({
-      kind,
+      kind: classification.kind,
       text: sanitizeCandidateText(normalized),
       source: 'user',
       timestamp: message.timestamp,
+      origin: classification.origin,
+      durability: classification.durability,
+      confidence: classification.confidence,
     });
   }
   return candidates;
@@ -135,7 +261,118 @@ function extractTaggedMemoryLine(line: string): MemoryCandidate | null {
     text: normalizeLine(match[2]),
     source: 'user',
     timestamp: '',
+    origin: 'auto_capture',
+    durability: match[1].toLowerCase() === 'loop' ? 'session' : 'durable',
+    confidence: match[1].toLowerCase() === 'loop' ? 0.7 : 0.8,
   };
+}
+
+function shouldPromoteMemoryLine(
+  kind: MemoryCandidate['kind'],
+  text: string,
+): boolean {
+  const normalized = normalizeLine(text).toLowerCase();
+  if (!normalized || normalized.length < 8) return false;
+  return isUsefulMemoryText(kind, normalized);
+}
+
+type MarkdownSection = {
+  title: string;
+  bullets: string[];
+};
+
+function parseMarkdownSections(raw: string): MarkdownSection[] {
+  const sections: MarkdownSection[] = [];
+  let current: MarkdownSection | null = null;
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const heading = line.match(/^##\s+(.+)$/);
+    if (heading) {
+      current = { title: heading[1].trim(), bullets: [] };
+      sections.push(current);
+      continue;
+    }
+    if (/^#\s+/.test(line)) continue;
+    if (!current) {
+      current = { title: 'General', bullets: [] };
+      sections.push(current);
+    }
+    const bullet = line.match(/^-+\s*(.+)$/);
+    if (bullet) current.bullets.push(normalizeLine(bullet[1]));
+  }
+
+  return sections;
+}
+
+function readBulletSections(filePath: string): MarkdownSection[] {
+  if (!fs.existsSync(filePath)) return [];
+  return parseMarkdownSections(fs.readFileSync(filePath, 'utf8'));
+}
+
+function syncPinnedCoreMemory(groupFolder: string): number {
+  const userPath = path.join(GROUPS_DIR, groupFolder, 'USER.md');
+  const memoryPath = path.join(GROUPS_DIR, groupFolder, 'MEMORY.md');
+  const now = new Date().toISOString();
+  const pinnedCandidates: Array<{
+    kind: MemoryCandidate['kind'];
+    text: string;
+  }> = [];
+
+  const userSections = readBulletSections(userPath);
+  const profileSection = userSections.find((section) =>
+    /profile/i.test(section.title),
+  );
+  const preferenceSection = userSections.find((section) =>
+    /preference/i.test(section.title),
+  );
+  for (const bullet of profileSection?.bullets || []) {
+    if (!isUsefulMemoryText('fact', bullet)) continue;
+    pinnedCandidates.push({ kind: 'fact', text: bullet });
+    if (pinnedCandidates.length >= 2) break;
+  }
+  for (const bullet of preferenceSection?.bullets || []) {
+    if (!isUsefulMemoryText('pref', bullet)) continue;
+    pinnedCandidates.push({ kind: 'pref', text: bullet });
+    if (pinnedCandidates.length >= 4) break;
+  }
+
+  const memorySections = readBulletSections(memoryPath);
+  const prioritiesSection = memorySections.find((section) =>
+    /current priorities|current focus|priorities/i.test(section.title),
+  );
+  for (const bullet of prioritiesSection?.bullets || []) {
+    if (!isUsefulMemoryText('proj', bullet)) continue;
+    pinnedCandidates.push({ kind: 'proj', text: bullet });
+    if (pinnedCandidates.length >= MAX_PINNED_CORE_ENTRIES) break;
+  }
+
+  let inserted = 0;
+  const seen = new Set<string>();
+  for (const candidate of pinnedCandidates) {
+    const key = `${candidate.kind}:${normalizeLine(candidate.text).toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    insertMemoryEntry({
+      group_folder: groupFolder,
+      scope: 'group',
+      kind: candidate.kind,
+      content: candidate.text,
+      source: 'explicit',
+      origin: 'explicit_request',
+      durability: 'pinned',
+      confidence: 0.98,
+      created_at: now,
+      last_confirmed_at: now,
+      source_file:
+        candidate.kind === 'proj' ? memoryPath : userPath,
+      pinned: true,
+    });
+    inserted++;
+    if (inserted >= MAX_PINNED_CORE_ENTRIES) break;
+  }
+  return inserted;
 }
 
 export function compactMemory(groupFolder: string): {
@@ -167,6 +404,7 @@ export function compactMemory(groupFolder: string): {
       for (const line of lines) {
         const parsed = extractTaggedMemoryLine(line);
         if (!parsed) continue;
+        if (!shouldPromoteMemoryLine(parsed.kind, parsed.text)) continue;
         const items = freshGrouped.get(parsed.kind)!;
         if (!items.includes(parsed.text)) {
           items.push(parsed.text);
@@ -195,7 +433,10 @@ export function compactMemory(groupFolder: string): {
         const bulletMatch = line.match(/^-+\s*(.+)$/);
         if (bulletMatch) {
           const text = normalizeLine(bulletMatch[1]);
-          if (text.length > 3) {
+          if (
+            text.length > 3 &&
+            shouldPromoteMemoryLine(currentSectionKind, text)
+          ) {
             const items = freshGrouped.get(currentSectionKind)!;
             // Append at the end — lower priority than fresh items.
             // When the 20-per-section cap is hit, these older entries are the
@@ -208,7 +449,12 @@ export function compactMemory(groupFolder: string): {
       const tagged = extractTaggedMemoryLine(line);
       if (tagged && !currentSectionKind) {
         const items = freshGrouped.get(tagged.kind)!;
-        if (!items.includes(tagged.text)) items.push(tagged.text);
+        if (
+          shouldPromoteMemoryLine(tagged.kind, tagged.text) &&
+          !items.includes(tagged.text)
+        ) {
+          items.push(tagged.text);
+        }
       }
     }
   }
@@ -242,6 +488,66 @@ export function compactMemory(groupFolder: string): {
   }
 
   return { memoryPath, promotedCount };
+}
+
+export function cleanupMemoryForGroup(groupFolder: string): {
+  cleanedDailyFiles: number;
+  removedDailyEntries: number;
+  promotedCount: number;
+  memoryPath: string;
+} {
+  const memoryDir = path.join(GROUPS_DIR, groupFolder, 'memory');
+  let cleanedDailyFiles = 0;
+  let removedDailyEntries = 0;
+
+  if (fs.existsSync(memoryDir)) {
+    const files = fs
+      .readdirSync(memoryDir)
+      .filter((name) => /^\d{4}-\d{2}-\d{2}\.md$/.test(name))
+      .sort();
+    for (const file of files) {
+      const filePath = path.join(memoryDir, file);
+      const parsed = fs
+        .readFileSync(filePath, 'utf8')
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map(extractTaggedMemoryLine)
+        .filter((candidate): candidate is MemoryCandidate => !!candidate)
+        .filter((candidate) =>
+          shouldPromoteMemoryLine(candidate.kind, candidate.text),
+        );
+
+      const deduped: string[] = [];
+      const seen = new Set<string>();
+      for (const candidate of parsed) {
+        const key = `${candidate.kind}:${normalizeLine(candidate.text).toLowerCase()}`;
+        if (seen.has(key)) {
+          removedDailyEntries += 1;
+          continue;
+        }
+        seen.add(key);
+        deduped.push(
+          `${candidate.timestamp ? candidate.timestamp.slice(11, 16) + ' ' : ''}${candidate.kind}: ${candidate.text}`.trim(),
+        );
+      }
+
+      const nextContent = deduped.join('\n');
+      const currentContent = fs.readFileSync(filePath, 'utf8').trim();
+      if (nextContent !== currentContent) {
+        fs.writeFileSync(filePath, nextContent ? `${nextContent}\n` : '');
+        cleanedDailyFiles += 1;
+      }
+    }
+  }
+
+  const compacted = compactMemory(groupFolder);
+  return {
+    cleanedDailyFiles,
+    removedDailyEntries,
+    promotedCount: compacted.promotedCount,
+    memoryPath: compacted.memoryPath,
+  };
 }
 
 /**
@@ -295,7 +601,11 @@ export function populateMemoryIndex(groupFolder: string): number {
           kind: tagged.kind,
           content: tagged.text,
           source: 'migration',
+          origin: 'migration',
+          durability: tagged.kind === 'loop' ? 'session' : 'durable',
+          confidence: tagged.kind === 'loop' ? 0.7 : 0.8,
           created_at: now,
+          last_confirmed_at: now,
           source_file: memoryPath,
         });
         count++;
@@ -315,13 +625,18 @@ export function populateMemoryIndex(groupFolder: string): number {
         if (bulletMatch) {
           const text = normalizeLine(bulletMatch[1]);
           if (text.length > 3) {
+            if (!isUsefulMemoryText(currentSectionKind, text)) continue;
             insertMemoryEntry({
               group_folder: groupFolder,
               scope: 'group',
               kind: currentSectionKind,
               content: text,
               source: 'migration',
+              origin: 'migration',
+              durability: currentSectionKind === 'loop' ? 'session' : 'durable',
+              confidence: currentSectionKind === 'loop' ? 0.7 : 0.8,
               created_at: now,
+              last_confirmed_at: now,
               source_file: memoryPath,
             });
             count++;
@@ -347,13 +662,18 @@ export function populateMemoryIndex(groupFolder: string): number {
       for (const line of lines) {
         const parsed = extractTaggedMemoryLine(line);
         if (parsed) {
+          if (!isUsefulMemoryText(parsed.kind, parsed.text)) continue;
           insertMemoryEntry({
             group_folder: groupFolder,
             scope: 'group',
             kind: parsed.kind,
             content: parsed.text,
             source: 'migration',
+            origin: 'migration',
+            durability: parsed.kind === 'loop' ? 'session' : 'durable',
+            confidence: parsed.kind === 'loop' ? 0.7 : 0.8,
             created_at: now,
+            last_confirmed_at: now,
             source_file: filePath,
           });
           count++;
@@ -373,6 +693,7 @@ export function populateMemoryIndex(groupFolder: string): number {
     /* non-fatal */
   }
 
+  count += syncPinnedCoreMemory(groupFolder);
   return count;
 }
 

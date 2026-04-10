@@ -35,6 +35,10 @@ export interface RuntimeToolPolicy {
   memory?: RuntimeToolFamilyPolicy;
   docs?: RuntimeToolFamilyPolicy;
   browser?: RuntimeToolFamilyPolicy;
+  /** When true, strip scheduling/watch tools so heartbeat can't create new tasks. */
+  isHeartbeat?: boolean;
+  /** When true, strip scheduling/watch tools so fired tasks can't re-schedule themselves. */
+  isScheduledTask?: boolean;
 }
 
 export interface RuntimeConfig {
@@ -56,16 +60,47 @@ export interface RuntimeConfig {
   };
 }
 
+/** A single message in the conversation history, compatible with OpenAI message format. */
+export interface ConversationMessage {
+  role: string;
+  content: string;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+}
+
 export interface RuntimeRequest {
   prompt: string;
   systemPrompt?: string;
   config: RuntimeConfig;
   secrets?: Record<string, string>;
+  onPartialText?: (text: string) => Promise<void> | void;
+  /**
+   * Prior conversation messages from previous warm-session turns.
+   * When provided, these are prepended to the messages array so the model
+   * has full conversation history without rebuilding context from scratch.
+   */
+  priorMessages?: ConversationMessage[];
+}
+
+export interface RuntimeUsageMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  source: 'provider' | 'estimated';
+  requests?: number;
 }
 
 export interface RuntimeResponse {
   result: string;
   sessionId: string;
+  usage?: RuntimeUsageMetrics;
+  /**
+   * Accumulated conversation messages after this turn (user + assistant + tool calls).
+   * Returned by warm-session-aware adapters so the caller can pass them as
+   * priorMessages on the next turn.
+   */
+  conversationMessages?: ConversationMessage[];
 }
 
 export interface RuntimeAdapter {

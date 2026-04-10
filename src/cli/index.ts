@@ -167,6 +167,12 @@ function parseRuntimeToolPolicy(
   };
 }
 
+function normalizeHostProbeBaseUrl(baseUrl: string): string {
+  return baseUrl
+    .replace(/host\.docker\.internal/gi, '127.0.0.1')
+    .replace(/localhost/gi, '127.0.0.1');
+}
+
 function resolveGroupFolderFlag(flags: Record<string, string>): string {
   const direct = getFlag(flags, 'group').trim();
   if (direct) return direct;
@@ -510,7 +516,7 @@ async function runModels(args: string[]): Promise<void> {
         );
       }
       endpointProbe = await probeOpenAICompatibleCapabilities({
-        baseUrl: resolved.runtimeConfig.baseUrl,
+        baseUrl: normalizeHostProbeBaseUrl(resolved.runtimeConfig.baseUrl),
         apiKey: resolved.secrets.OPENAI_API_KEY || undefined,
         modelHint: profile.model,
       });

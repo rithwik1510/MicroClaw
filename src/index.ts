@@ -6,6 +6,8 @@ import {
   ASSISTANT_NAME,
   DATA_DIR,
   IDLE_TIMEOUT,
+  OPENAI_WARM_SESSIONS,
+  OPENAI_SESSION_IDLE_TIMEOUT_MS,
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -28,6 +30,7 @@ import {
   getAllTasks,
   getConversationSummary,
   logRuntimeEvent,
+  logRuntimeUsage,
   getMessagesSince,
   getRecentMessages,
   getNewMessages,
@@ -51,6 +54,10 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { buildContextBundle } from './context/builder.js';
 import {
+  CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS,
+  CONTEXT_RESERVED_TOOL_CHARS,
+} from './context/config.js';
+import {
   hasPendingAssistantBootstrap,
   isExplicitAssistantBootstrapRequest,
   maybeHandleAssistantBootstrap,
@@ -63,7 +70,12 @@ import { insertMemoryEntry } from './db.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startHeartbeatLoop } from './heartbeat.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import {
+  Channel,
+  ChannelMessageRef,
+  NewMessage,
+  RegisteredGroup,
+} from './types.js';
 import { logger } from './logger.js';
 import {
   resolveRuntimeExecutionAsync,
@@ -80,6 +92,7 @@ import {
 } from './process-lock.js';
 import { runAgentProcess } from './execution/backend.js';
 import { ensureToolServicesReadyOnStartup } from './tools/service-supervisor.js';
+import { buildRuntimeUsageLog } from './runtime-usage.js';
 import {
   probeExecutionBackend,
   resolveExecutionBackendForProvider,
@@ -100,11 +113,26 @@ const channels: Channel[] = [];
 const queue = new GroupQueue();
 const PROCESS_LOCK_PATH = path.join(DATA_DIR, 'microclaw.lock');
 let hasProcessLock = false;
-const CONTINUITY_RECENT_LIMIT = 6;
-const CONTINUITY_SCAN_LIMIT = 60;
+/*
+ * Quality-path truth table:
+ * - Continuity recent/scan limits: this file (`CONTINUITY_RECENT_LIMIT`, `CONTINUITY_SCAN_LIMIT`)
+ * - Cloud output caps and cloud-safe prompt sanitization: `container/agent-runner/src/runtime/openai.ts`
+ * - Web tool budgets for cloud turns: `container/agent-runner/src/runtime/openai.ts` (`webConfig`)
+ * - Provider fetch/extract content cap: `container/agent-runner/src/tools/web/providers.ts` (`fetchMaxChars`)
+ * - Runtime/env defaults: `.env.example`
+ */
+const CONTINUITY_RECENT_LIMIT = 12;
+const CONTINUITY_SCAN_LIMIT = 120;
 const CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES = 8;
 const CONTINUITY_SUMMARY_MIN_OLDER_CHARS = 3000;
 const typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
+type TurnClass =
+  | 'tiny_conversation'
+  | 'simple_conversation'
+  | 'normal_conversation'
+  | 'memory_or_state'
+  | 'web_or_browser'
+  | 'scheduling';
 
 async function pulseTyping(channel: Channel, chatJid: string): Promise<void> {
   try {
@@ -155,6 +183,19 @@ function isHostGreetingLike(prompt: string): boolean {
   );
 }
 
+function isTinyConversationLike(prompt: string): boolean {
+  const current = currentPromptMessage(prompt)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (
+    isHostGreetingLike(current) ||
+    /^(thanks|thank you|thx|ok|okay|cool|nice|great|got it|understood|alright|see ya|bye|gn|good night)[!.? ]*$/.test(
+      current,
+    )
+  );
+}
+
 function isLikelyWebPrompt(prompt: string): boolean {
   const current = currentPromptMessage(prompt).toLowerCase();
   return (
@@ -176,6 +217,115 @@ function isHostShortCasualPrompt(prompt: string): boolean {
 
 function hostFallbackReplyForPrompt(prompt: string): string | null {
   return null;
+}
+
+function hostFallbackReplyForError(
+  error: string | null | undefined,
+): string | null {
+  if (!error) return null;
+  const normalized = error.toLowerCase();
+
+  if (
+    normalized.includes('http 401') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('not authorized')
+  ) {
+    return 'The configured model API key was rejected by the provider (HTTP 401). Please verify that the key is a valid DeepInfra API key with access to the selected model.';
+  }
+
+  if (normalized.includes('http 403') || normalized.includes('forbidden')) {
+    return 'The model provider refused access to this request (HTTP 403). The key may lack access to the selected model or endpoint.';
+  }
+
+  if (
+    normalized.includes('network request failed') ||
+    normalized.includes('econnrefused') ||
+    normalized.includes('enotfound')
+  ) {
+    return 'The configured model endpoint could not be reached. Please verify the provider base URL and network access.';
+  }
+
+  return null;
+}
+
+function looksLikeSchedulingPrompt(prompt: string): boolean {
+  const current = currentPromptMessage(prompt).toLowerCase();
+  const timeCue =
+    /\b(at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|tomorrow|today|tonight|later today|later tonight|in\s+\d+\s+(?:minute|minutes|hour|hours)|every\s+(?:day|weekday|weekdays|week|weekend|weekends|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|daily|weekly|each\s+(?:day|week)|every morning|every evening)\b/.test(
+      current,
+    );
+  const taskCue =
+    /\b(remind|send|check|read|look up|lookup|watch|monitor|notify|message|summarize|summary)\b/.test(
+      current,
+    );
+  return timeCue && taskCue;
+}
+
+function isMemoryAssistedPrompt(prompt: string): boolean {
+  const current = currentPromptMessage(prompt).toLowerCase();
+  return /\b(remember|recall|what do you remember|what did i tell you|keep in mind|my preference|my timezone|my name is|from now on)\b/.test(
+    current,
+  );
+}
+
+function classifyTurnClass(prompt: string): TurnClass {
+  if (looksLikeSchedulingPrompt(prompt)) return 'scheduling';
+  if (isLikelyWebPrompt(prompt)) return 'web_or_browser';
+  if (isMemoryAssistedPrompt(prompt)) return 'memory_or_state';
+  if (isTinyConversationLike(prompt)) return 'tiny_conversation';
+  if (isHostShortCasualPrompt(prompt)) return 'simple_conversation';
+  return 'normal_conversation';
+}
+
+function resolveContextTurnMode(
+  prompt: string,
+  capabilityRoute:
+    | 'plain_response'
+    | 'web_lookup'
+    | 'browser_operation'
+    | 'deny_or_escalate',
+):
+  | 'conversational'
+  | 'memory_assisted'
+  | 'web_browser'
+  | 'scheduling_planning' {
+  if (looksLikeSchedulingPrompt(prompt)) return 'scheduling_planning';
+  if (
+    capabilityRoute === 'web_lookup' ||
+    capabilityRoute === 'browser_operation'
+  ) {
+    return 'web_browser';
+  }
+  if (isMemoryAssistedPrompt(prompt)) return 'memory_assisted';
+  return 'conversational';
+}
+
+function contextToolBudgetForTurnMode(
+  turnMode:
+    | 'conversational'
+    | 'memory_assisted'
+    | 'web_browser'
+    | 'scheduling_planning',
+): { reservedToolChars: number; actualToolSchemaChars: number } {
+  switch (turnMode) {
+    case 'memory_assisted':
+      return {
+        reservedToolChars: 7_000,
+        actualToolSchemaChars: 4_500,
+      };
+    case 'web_browser':
+    case 'scheduling_planning':
+      return {
+        reservedToolChars: CONTEXT_RESERVED_TOOL_CHARS,
+        actualToolSchemaChars: CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS,
+      };
+    case 'conversational':
+    default:
+      return {
+        reservedToolChars: 2_500,
+        actualToolSchemaChars: 0,
+      };
+  }
 }
 
 function acquireProcessLock(): void {
@@ -268,6 +418,7 @@ export function _setRegisteredGroups(
  * Called by the GroupQueue when it's this group's turn.
  */
 async function processGroupMessages(chatJid: string): Promise<boolean> {
+  const processingStartedAt = Date.now();
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -303,8 +454,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     (hasPendingAssistantBootstrap(group.folder) ||
       isExplicitAssistantBootstrapRequest(latestUserMessage.content));
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
+  // For non-main groups, check if trigger is required and present.
+  // DMs never require a trigger — the user is already talking directly to the bot.
+  if (!isMainGroup && !isDm && group.requiresTrigger !== false) {
     const hasTrigger = missedMessages.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
@@ -370,48 +522,77 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const runtimeSelection = resolveRuntimeSelection(group.folder);
   const primaryProvider =
     runtimeSelection.profiles[0]?.provider || 'openai_compatible';
-  const recentConversation = getRecentMessages(chatJid, CONTINUITY_SCAN_LIMIT);
-  const storedSummary = getConversationSummary(group.folder);
-  const continuityPlan = buildContinuityPlan({
-    assistantName: ASSISTANT_NAME,
-    conversationMessages: recentConversation,
-    currentMessages: missedMessages,
-    storedSummary: storedSummary?.summary,
-    recentTurnLimit: CONTINUITY_RECENT_LIMIT,
-    summaryMinMessages: CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES,
-    summaryMinChars: CONTINUITY_SUMMARY_MIN_OLDER_CHARS,
-  });
-  if (
-    continuityPlan.shouldPersistSummary &&
-    (storedSummary?.summary !== continuityPlan.computedSummary ||
-      storedSummary?.sourceMessageCount !== continuityPlan.sourceMessageCount ||
-      storedSummary?.lastMessageTimestamp !==
-        continuityPlan.lastMessageTimestamp)
-  ) {
-    setConversationSummary({
-      groupFolder: group.folder,
-      summary: continuityPlan.computedSummary,
-      sourceMessageCount: continuityPlan.sourceMessageCount,
-      lastMessageTimestamp: continuityPlan.lastMessageTimestamp,
+  const latestPromptText =
+    latestUserMessage?.content || formatMessages(missedMessages);
+  const turnClass = classifyTurnClass(latestPromptText);
+  const useFastLane =
+    primaryProvider === 'openai_compatible' &&
+    (turnClass === 'tiny_conversation' || turnClass === 'simple_conversation');
+  let prompt: string;
+  if (useFastLane) {
+    prompt =
+      turnClass === 'tiny_conversation'
+        ? formatMessages(missedMessages.slice(-1))
+        : formatMessages(missedMessages.slice(-2));
+    logger.info(
+      {
+        group: group.folder,
+        turnClass,
+        mode: 'fast_lane',
+        session_mode: 'cold_start',
+      },
+      'Skipped continuity for trivial conversational turn',
+    );
+  } else {
+    const recentConversation = getRecentMessages(
+      chatJid,
+      CONTINUITY_SCAN_LIMIT,
+    );
+    const storedSummary = getConversationSummary(group.folder);
+    const continuityPlan = buildContinuityPlan({
+      assistantName: ASSISTANT_NAME,
+      conversationMessages: recentConversation,
+      currentMessages: missedMessages,
+      storedSummary: storedSummary?.summary,
+      recentTurnLimit: CONTINUITY_RECENT_LIMIT,
+      summaryMinMessages: CONTINUITY_SUMMARY_MIN_OLDER_MESSAGES,
+      summaryMinChars: CONTINUITY_SUMMARY_MIN_OLDER_CHARS,
     });
-  }
-  const prompt =
-    primaryProvider === 'openai_compatible'
-      ? buildContinuityPrompt({
-          assistantName: ASSISTANT_NAME,
-          summary: continuityPlan.summaryToUse,
-          recentContextMessages: continuityPlan.recentContextMessages,
-          currentMessages: continuityPlan.currentMessages,
-        })
-      : formatMessages(missedMessages);
+    if (
+      continuityPlan.shouldPersistSummary &&
+      (storedSummary?.summary !== continuityPlan.computedSummary ||
+        storedSummary?.sourceMessageCount !==
+          continuityPlan.sourceMessageCount ||
+        storedSummary?.lastMessageTimestamp !==
+          continuityPlan.lastMessageTimestamp)
+    ) {
+      setConversationSummary({
+        groupFolder: group.folder,
+        summary: continuityPlan.computedSummary,
+        sourceMessageCount: continuityPlan.sourceMessageCount,
+        lastMessageTimestamp: continuityPlan.lastMessageTimestamp,
+      });
+    }
+    prompt =
+      primaryProvider === 'openai_compatible'
+        ? buildContinuityPrompt({
+            assistantName: ASSISTANT_NAME,
+            summary: continuityPlan.summaryToUse,
+            recentContextMessages: continuityPlan.recentContextMessages,
+            currentMessages: continuityPlan.currentMessages,
+          })
+        : formatMessages(missedMessages);
 
-  logger.info(
-    {
-      group: group.folder,
-      continuity: continuityPlan.diagnostics,
-    },
-    'Continuity context assembled',
-  );
+    logger.info(
+      {
+        group: group.folder,
+        continuity: continuityPlan.diagnostics,
+        turnClass,
+        session_mode: 'cold_start',
+      },
+      'Continuity context assembled',
+    );
+  }
 
   const memoryCandidates = extractMemoryCandidates(
     missedMessages,
@@ -428,7 +609,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           kind: candidate.kind,
           content: candidate.text,
           source: 'auto',
+          origin:
+            candidate.origin === 'explicit_request'
+              ? 'explicit_request'
+              : 'conversation',
+          durability: candidate.durability,
+          confidence: candidate.confidence,
           created_at: candidate.timestamp || new Date().toISOString(),
+          last_confirmed_at: candidate.timestamp || new Date().toISOString(),
+          pinned: candidate.durability === 'pinned',
         });
       } catch {
         /* non-fatal */
@@ -448,72 +637,168 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
-  const processingStartedAt = Date.now();
+  const contextReadyAt = Date.now();
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Use a shorter idle timeout for warm OpenAI sessions to avoid long-lived zombie processes.
+  const effectiveIdleTimeout =
+    primaryProvider === 'openai_compatible' && OPENAI_WARM_SESSIONS
+      ? OPENAI_SESSION_IDLE_TIMEOUT_MS
+      : IDLE_TIMEOUT;
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       logger.debug(
-        { group: group.name },
+        { group: group.name, idleTimeoutMs: effectiveIdleTimeout },
         'Idle timeout, closing container stdin',
       );
       queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    }, effectiveIdleTimeout);
+  };
+
+  const stopTypingNow = async () => {
+    stopTypingHeartbeat(chatJid);
+    await channel.setTyping?.(chatJid, false);
   };
 
   startTypingHeartbeat(channel, chatJid);
   let hadError = false;
   let outputSentToUser = false;
+  let lastStreamError: string | null = null;
+  let firstVisibleOutputAt: number | null = null;
+  let partialBuffer = '';
+  let streamedMessageRef: ChannelMessageRef | null = null;
+  let assistantReplyRecorded = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        recordAssistantReply(chatJid, text);
-        outputSentToUser = true;
+  const runResult = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
+        if (text && result.isPartial) {
+          partialBuffer += text;
+          firstVisibleOutputAt ??= Date.now();
+          if (channel.updateMessage && partialBuffer.length <= 1900) {
+            try {
+              if (!streamedMessageRef) {
+                streamedMessageRef = await channel.sendMessage(
+                  chatJid,
+                  partialBuffer,
+                );
+              } else {
+                await channel.updateMessage(
+                  chatJid,
+                  streamedMessageRef,
+                  partialBuffer,
+                );
+              }
+              outputSentToUser = streamedMessageRef !== null;
+              if (outputSentToUser) {
+                await stopTypingNow();
+              }
+            } catch (err) {
+              logger.debug(
+                { group: group.name, err },
+                'Failed to update streamed Discord message',
+              );
+            }
+          }
+        } else if (text) {
+          firstVisibleOutputAt ??= Date.now();
+          if (
+            streamedMessageRef &&
+            channel.updateMessage &&
+            text.length <= 2000
+          ) {
+            await channel.updateMessage(chatJid, streamedMessageRef, text);
+          } else {
+            if (streamedMessageRef && channel.deleteMessage) {
+              await channel.deleteMessage(chatJid, streamedMessageRef);
+              streamedMessageRef = null;
+            }
+            await channel.sendMessage(chatJid, text);
+          }
+          if (!assistantReplyRecorded) {
+            recordAssistantReply(chatJid, text);
+            assistantReplyRecorded = true;
+          }
+          outputSentToUser = true;
+          await stopTypingNow();
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success' && !result.isPartial && !result.result) {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-      logger.warn(
-        { group: group.name, error: result.error },
-        'Streamed agent error event',
-      );
-      stopTypingHeartbeat(chatJid);
-      await channel.setTyping?.(chatJid, false);
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+        lastStreamError = result.error || 'Unknown runtime error';
+        logger.warn(
+          { group: group.name, error: result.error },
+          'Streamed agent error event',
+        );
+        // In warm-session mode, an errored turn can leave the runner waiting
+        // for more IPC input. Close stdin now so this run unwinds quickly and
+        // fallback profiles (or host fallback text) can be delivered promptly.
+        queue.closeStdin(chatJid);
+        await stopTypingNow();
+      }
+    },
+    {
+      turnClass,
+      // Fast lane skips continuity assembly, but still keeps compact persona
+      // and user-memory context so short Discord turns remain grounded.
+      skipContextBundle: false,
+      disableTools: useFastLane,
+    },
+  );
 
-  stopTypingHeartbeat(chatJid);
-  await channel.setTyping?.(chatJid, false);
+  await stopTypingNow();
   if (idleTimer) clearTimeout(idleTimer);
   logger.info(
     {
       group: group.name,
       durationMs: Date.now() - processingStartedAt,
+      latency: {
+        ingest_ms: contextReadyAt - processingStartedAt,
+        context_ms: contextReadyAt - processingStartedAt,
+        api_first_byte_ms:
+          firstVisibleOutputAt === null
+            ? null
+            : firstVisibleOutputAt - contextReadyAt,
+        total_ms: Date.now() - processingStartedAt,
+      },
+      partialChars: partialBuffer.length,
       outputSentToUser,
       hadError,
+      session_mode: 'cold_start',
+      turnClass,
     },
     'Finished processing messages',
   );
+
+  if (outputSentToUser && !assistantReplyRecorded && partialBuffer.trim()) {
+    recordAssistantReply(chatJid, partialBuffer.trim());
+    assistantReplyRecorded = true;
+  }
 
   // Commit piped follow-up cursor only when the run completed cleanly.
   // If we mark it early and then error, the follow-up can be lost.
@@ -526,10 +811,45 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     delete pendingPipedTimestamp[chatJid];
   }
 
-  if (output === 'error' || hadError) {
+  if (runResult.status === 'error' || hadError) {
+    if (!outputSentToUser && partialBuffer.trim()) {
+      try {
+        if (
+          streamedMessageRef &&
+          channel.updateMessage &&
+          partialBuffer.trim().length <= 2000
+        ) {
+          await channel.updateMessage(
+            chatJid,
+            streamedMessageRef,
+            partialBuffer.trim(),
+          );
+        } else {
+          await channel.sendMessage(chatJid, partialBuffer.trim());
+        }
+        if (!assistantReplyRecorded) {
+          recordAssistantReply(chatJid, partialBuffer.trim());
+          assistantReplyRecorded = true;
+        }
+        logger.warn(
+          { group: group.name, turnClass },
+          'Stream ended after partial output; delivered buffered partial text',
+        );
+        return true;
+      } catch (sendErr) {
+        logger.warn(
+          { group: group.name, err: sendErr },
+          'Failed to deliver buffered partial text after stream error',
+        );
+      }
+    }
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
+      if (!assistantReplyRecorded && partialBuffer.trim()) {
+        recordAssistantReply(chatJid, partialBuffer.trim());
+        assistantReplyRecorded = true;
+      }
       // If follow-up messages were piped during this run, force a re-check.
       // This avoids requiring the user to send another "?" to unstick queueing.
       if (pendingPipedTimestamp[chatJid]) {
@@ -544,6 +864,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Do not fail silently: send a concise fallback message to the user.
     try {
       const fallbackText =
+        hostFallbackReplyForError(lastStreamError || runResult.error) ||
         hostFallbackReplyForPrompt(prompt) ||
         'I ran into a runtime issue while processing that request. Please retry in a moment.';
       await channel.sendMessage(chatJid, fallbackText);
@@ -576,6 +897,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   if (!outputSentToUser && !hadError) {
+    if (partialBuffer.trim()) {
+      try {
+        if (
+          streamedMessageRef &&
+          channel.updateMessage &&
+          partialBuffer.trim().length <= 2000
+        ) {
+          await channel.updateMessage(
+            chatJid,
+            streamedMessageRef,
+            partialBuffer.trim(),
+          );
+        } else {
+          await channel.sendMessage(chatJid, partialBuffer.trim());
+        }
+        if (!assistantReplyRecorded) {
+          recordAssistantReply(chatJid, partialBuffer.trim());
+          assistantReplyRecorded = true;
+        }
+        logger.warn(
+          { group: group.name, turnClass },
+          'Agent completed without final text; delivered buffered partial output',
+        );
+        return true;
+      } catch (sendErr) {
+        logger.warn(
+          { group: group.name, err: sendErr },
+          'Failed to send buffered partial output',
+        );
+      }
+    }
     try {
       const fallbackText =
         hostFallbackReplyForPrompt(prompt) ||
@@ -608,24 +960,16 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<'success' | 'error'> {
+  options?: {
+    turnClass?: TurnClass;
+    skipContextBundle?: boolean;
+    disableTools?: boolean;
+  },
+): Promise<{ status: 'success' | 'error'; error?: string }> {
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
   const runtimeSelection = resolveRuntimeSelection(group.folder);
-  const contextBundle = buildContextBundle({
-    groupFolder: group.folder,
-    prompt,
-  });
-  if (contextBundle.diagnostics.warnings.length > 0) {
-    logger.warn(
-      {
-        group: group.folder,
-        warnings: contextBundle.diagnostics.warnings,
-        finalChars: contextBundle.diagnostics.finalChars,
-      },
-      'Context builder warnings',
-    );
-  }
+  let lastProfileError: string | undefined;
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
@@ -666,6 +1010,9 @@ async function runAgent(
     for (let i = 0; i < runtimeSelection.profiles.length; i++) {
       const profile = runtimeSelection.profiles[i];
       let streamedSuccessLogged = false;
+      let usageLogged = false;
+      const attemptStartedAt = new Date().toISOString();
+      const attemptStartedAtMs = Date.now();
 
       logRuntimeEvent({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
@@ -683,6 +1030,29 @@ async function runAgent(
         prompt,
         toolPolicy: resolved.runtimeConfig.toolPolicy,
       });
+      const turnMode = resolveContextTurnMode(prompt, capabilityRoute);
+      const contextBudget = contextToolBudgetForTurnMode(turnMode);
+      const contextBundle = options?.skipContextBundle
+        ? null
+        : buildContextBundle({
+            groupFolder: group.folder,
+            prompt,
+            turnMode,
+            reservedToolChars: contextBudget.reservedToolChars,
+            actualToolSchemaChars: contextBudget.actualToolSchemaChars,
+          });
+      if (contextBundle && contextBundle.diagnostics.warnings.length > 0) {
+        logger.warn(
+          {
+            group: group.folder,
+            profile: profile.id,
+            turnMode,
+            warnings: contextBundle.diagnostics.warnings,
+            finalChars: contextBundle.diagnostics.finalChars,
+          },
+          'Context builder warnings',
+        );
+      }
       if (
         resolved.authRefreshMessage &&
         resolved.authRefreshMessage.toLowerCase().includes('refreshed')
@@ -706,7 +1076,7 @@ async function runAgent(
         profileId: profile.id,
         provider: profile.provider,
         eventType: 'attempt',
-        message: `Attempt ${i + 1} using profile ${profile.id} (${capabilityRoute})`,
+        message: `Attempt ${i + 1} using profile ${profile.id} (${capabilityRoute}${options?.turnClass ? `, ${options.turnClass}` : ''})`,
         timestamp: new Date().toISOString(),
       });
       logger.info(
@@ -714,6 +1084,7 @@ async function runAgent(
           group: group.folder,
           profile: profile.id,
           capabilityRoute,
+          turnClass: options?.turnClass,
           detail: capabilityRouteSummary(capabilityRoute),
         },
         'Capability route selected',
@@ -723,7 +1094,7 @@ async function runAgent(
         group,
         {
           prompt,
-          systemPrompt: contextBundle.systemPrompt || undefined,
+          systemPrompt: contextBundle?.systemPrompt || undefined,
           sessionId,
           groupFolder: group.folder,
           chatJid,
@@ -733,6 +1104,19 @@ async function runAgent(
           runtimeConfig: {
             ...resolved.runtimeConfig,
             capabilityRoute,
+            capabilities: options?.disableTools
+              ? {
+                  ...(resolved.runtimeConfig.capabilities || {
+                    supportsResponses: true,
+                    supportsChatCompletions: true,
+                    supportsTools: true,
+                    supportsStreaming: true,
+                    requiresApiKey: false,
+                    checkedAt: new Date().toISOString(),
+                  }),
+                  supportsTools: false,
+                }
+              : resolved.runtimeConfig.capabilities,
           },
           retryPolicy: runtimeSelection.retryPolicy,
           secrets: resolved.secrets,
@@ -742,6 +1126,32 @@ async function runAgent(
             queue.registerProcess(chatJid, proc, containerName, group.folder),
           onOutput: wrappedOnOutput
             ? async (streamed) => {
+                if (!usageLogged && streamed.usage) {
+                  usageLogged = true;
+                  const usageLog = buildRuntimeUsageLog({
+                    groupFolder: group.folder,
+                    chatJid,
+                    profileId: profile.id,
+                    provider: profile.provider,
+                    model: profile.model,
+                    triggerKind: 'message',
+                    startedAt: attemptStartedAt,
+                    durationMs: Date.now() - attemptStartedAtMs,
+                    usage: streamed.usage,
+                  });
+                  logRuntimeUsage(usageLog);
+                  logger.info(
+                    {
+                      group: group.folder,
+                      profile: profile.id,
+                      trigger: 'message',
+                      tokens: usageLog.usage.totalTokens,
+                      costUsd: usageLog.totalCostUsd,
+                      usageSource: usageLog.usage.source,
+                    },
+                    'Runtime usage recorded',
+                  );
+                }
                 if (
                   !streamedSuccessLogged &&
                   streamed.status === 'success' &&
@@ -784,10 +1194,11 @@ async function runAgent(
             timestamp: new Date().toISOString(),
           });
         }
-        return 'success';
+        return { status: 'success' };
       }
 
       const hasFallback = i < runtimeSelection.profiles.length - 1;
+      lastProfileError = output.error || lastProfileError;
       logRuntimeEvent({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
         groupFolder: group.folder,
@@ -813,10 +1224,18 @@ async function runAgent(
       );
     }
 
-    return 'error';
+    return {
+      status: 'error',
+      error:
+        lastProfileError ||
+        'All runtime profiles failed without a provider error message.',
+    };
   } catch (err) {
     logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
+    return {
+      status: 'error',
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -867,11 +1286,13 @@ async function startMessageLoop(): Promise<void> {
           }
 
           const isMainGroup = group.isMain === true;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const isDmChat = /dm/i.test(group.folder);
+          const needsTrigger = !isMainGroup && !isDmChat && group.requiresTrigger !== false;
 
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
+          // DMs never require a trigger.
           if (needsTrigger) {
             const hasTrigger = groupMessages.some((m) =>
               TRIGGER_PATTERN.test(m.content.trim()),
@@ -892,11 +1313,20 @@ async function startMessageLoop(): Promise<void> {
           const runtimeSelection = resolveRuntimeSelection(group.folder);
           const primaryProvider =
             runtimeSelection.profiles[0]?.provider || 'openai_compatible';
-          const supportsLivePiping = primaryProvider === 'claude';
+          // Live piping: for Claude, the SDK's streaming loop handles IPC natively.
+          // For OpenAI-compatible with warm sessions enabled, the native process stays
+          // alive after the first turn and polls IPC for follow-up messages.
+          const supportsLivePiping =
+            primaryProvider === 'claude' ||
+            (primaryProvider === 'openai_compatible' && OPENAI_WARM_SESSIONS);
 
           if (supportsLivePiping && queue.sendMessage(chatJid, formatted)) {
             logger.debug(
-              { chatJid, count: messagesToSend.length },
+              {
+                chatJid,
+                count: messagesToSend.length,
+                session_mode: 'warm_reuse',
+              },
               'Piped messages to active container',
             );
             pendingPipedTimestamp[chatJid] =
@@ -1078,10 +1508,10 @@ async function main(): Promise<void> {
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, text) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      await channel.sendMessage(jid, text);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

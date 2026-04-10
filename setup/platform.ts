@@ -1,5 +1,5 @@
 /**
- * Cross-platform detection utilities for NanoClaw setup.
+ * Cross-platform detection utilities for MicroClaw setup.
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -100,7 +100,9 @@ export function getServiceManager(): ServiceManager {
 
 export function getNodePath(): string {
   try {
-    return execSync('command -v node', { encoding: 'utf-8' }).trim();
+    const cmd = process.platform === 'win32' ? 'where node' : 'command -v node';
+    const out = execSync(cmd, { encoding: 'utf-8' }).trim();
+    return out.split(/\r?\n/)[0].trim();
   } catch {
     return process.execPath;
   }
@@ -108,7 +110,9 @@ export function getNodePath(): string {
 
 export function commandExists(name: string): boolean {
   try {
-    execSync(`command -v ${name}`, { stdio: 'ignore' });
+    const cmd =
+      process.platform === 'win32' ? `where ${name}` : `command -v ${name}`;
+    execSync(cmd, { stdio: 'ignore' });
     return true;
   } catch {
     return false;

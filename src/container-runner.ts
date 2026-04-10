@@ -28,6 +28,7 @@ import {
   RegisteredGroup,
   RetryPolicy,
   RuntimeExecutionConfig,
+  RuntimeUsageMetrics,
 } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -56,6 +57,8 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: RuntimeUsageMetrics;
+  isPartial?: boolean;
 }
 
 interface VolumeMount {

@@ -112,7 +112,10 @@ function fetchCacheTtlMs(ctx: ToolExecutionContext): number {
 }
 
 function fetchMaxChars(ctx: ToolExecutionContext): number {
-  return Math.max(500, Math.min(20_000, positiveInt(ctx.secrets?.WEB_FETCH_MAX_CHARS, 6000)));
+  return Math.max(
+    500,
+    Math.min(50_000, positiveInt(ctx.secrets?.WEB_FETCH_MAX_CHARS, 12_000)),
+  );
 }
 
 function fetchMaxBytes(ctx: ToolExecutionContext): number {

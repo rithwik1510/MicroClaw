@@ -17,6 +17,58 @@ interface PendingCustomize {
   file_hashes: Record<string, string>;
 }
 
+function writeEmptyTempFile(): string {
+  const tmpPath = path.join(
+    process.cwd(),
+    CUSTOM_DIR,
+    `.empty-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+  );
+  fs.writeFileSync(tmpPath, '', 'utf-8');
+  return tmpPath;
+}
+
+function unifiedDiff(oldPath: string, newPath: string): string {
+  const oldExists = fs.existsSync(oldPath);
+  const newExists = fs.existsSync(newPath);
+  if (!oldExists && !newExists) return '';
+
+  const oldArg = oldExists ? oldPath : writeEmptyTempFile();
+  const newArg = newExists ? newPath : writeEmptyTempFile();
+
+  try {
+    try {
+      return execFileSync('git', ['diff', '--no-index', '--', oldArg, newArg], {
+        encoding: 'utf-8',
+      });
+    } catch (err: unknown) {
+      const execErr = err as { status?: number; stdout?: string };
+      if (execErr.status === 1 && execErr.stdout) {
+        return execErr.stdout;
+      }
+      if (execErr.status === 2) {
+        throw new Error('diff error: git diff --no-index returned status 2');
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`diff error: ${msg}`);
+    }
+  } finally {
+    if (!oldExists) {
+      try {
+        fs.unlinkSync(oldArg);
+      } catch {
+        // best effort cleanup
+      }
+    }
+    if (!newExists) {
+      try {
+        fs.unlinkSync(newArg);
+      } catch {
+        // best effort cleanup
+      }
+    }
+  }
+}
+
 function getPendingPath(): string {
   return path.join(process.cwd(), CUSTOM_DIR, 'pending.yaml');
 }
@@ -94,29 +146,7 @@ export function commitCustomize(): void {
   for (const relativePath of changedFiles) {
     const basePath = path.join(baseDir, relativePath);
     const currentPath = path.join(cwd, relativePath);
-
-    // Use /dev/null if either side doesn't exist
-    const oldPath = fs.existsSync(basePath) ? basePath : '/dev/null';
-    const newPath = fs.existsSync(currentPath) ? currentPath : '/dev/null';
-
-    try {
-      const diff = execFileSync('diff', ['-ruN', oldPath, newPath], {
-        encoding: 'utf-8',
-      });
-      combinedPatch += diff;
-    } catch (err: unknown) {
-      const execErr = err as { status?: number; stdout?: string };
-      if (execErr.status === 1 && execErr.stdout) {
-        // diff exits 1 when files differ — that's expected
-        combinedPatch += execErr.stdout;
-      } else if (execErr.status === 2) {
-        throw new Error(
-          `diff error for ${relativePath}: diff exited with status 2 (check file permissions or encoding)`,
-        );
-      } else {
-        throw err;
-      }
-    }
+    combinedPatch += unifiedDiff(basePath, currentPath);
   }
 
   if (!combinedPatch.trim()) {

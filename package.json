@@ -24,6 +24,7 @@
     "probe:web": "tsx scripts/probe-web.ts",
     "probe:browser": "tsx scripts/probe-browser-tool-calling.ts",
     "probe:browser-runtime": "tsx scripts/probe-browser-runtime.ts",
+    "cleanup:memory": "tsx scripts/cleanup-memory.ts",
     "debug": "tsx src/cli/index.ts debug",
     "gate": "npm run typecheck && npm run test && npm run build && npm --prefix container/agent-runner run build && npm run command-center -- launch-check --deep"
   },

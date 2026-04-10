@@ -36,9 +36,9 @@ export async function run(_args: string[]): Promise<void> {
   if (mgr === 'launchd') {
     try {
       const output = execSync('launchctl list', { encoding: 'utf-8' });
-      if (output.includes('com.nanoclaw')) {
+      if (output.includes('com.microclaw')) {
         // Check if it has a PID (actually running)
-        const line = output.split('\n').find((l) => l.includes('com.nanoclaw'));
+        const line = output.split('\n').find((l) => l.includes('com.microclaw'));
         if (line) {
           const pidField = line.trim().split(/\s+/)[0];
           service = pidField !== '-' && pidField ? 'running' : 'stopped';
@@ -50,14 +50,14 @@ export async function run(_args: string[]): Promise<void> {
   } else if (mgr === 'systemd') {
     const prefix = isRoot() ? 'systemctl' : 'systemctl --user';
     try {
-      execSync(`${prefix} is-active nanoclaw`, { stdio: 'ignore' });
+      execSync(`${prefix} is-active microclaw`, { stdio: 'ignore' });
       service = 'running';
     } catch {
       try {
         const output = execSync(`${prefix} list-unit-files`, {
           encoding: 'utf-8',
         });
-        if (output.includes('nanoclaw')) {
+        if (output.includes('microclaw')) {
           service = 'stopped';
         }
       } catch {
@@ -66,7 +66,7 @@ export async function run(_args: string[]): Promise<void> {
     }
   } else {
     // Check for nohup PID file
-    const pidFile = path.join(projectRoot, 'nanoclaw.pid');
+    const pidFile = path.join(projectRoot, 'microclaw.pid');
     if (fs.existsSync(pidFile)) {
       try {
         const raw = fs.readFileSync(pidFile, 'utf-8').trim();
@@ -99,10 +99,95 @@ export async function run(_args: string[]): Promise<void> {
   // 3. Check credentials
   let credentials = 'missing';
   const envFile = path.join(projectRoot, '.env');
+  const encryptedVault = path.join(projectRoot, 'store', 'auth', 'credentials.enc.json');
+  let authProfilesCount = 0;
+  const dbPath = path.join(STORE_DIR, 'messages.db');
+  if (fs.existsSync(dbPath)) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      const row = db
+        .prepare('SELECT COUNT(*) as count FROM auth_profiles')
+        .get() as { count: number };
+      authProfilesCount = row.count;
+      db.close();
+    } catch {
+      // table may not exist in old installs
+    }
+  }
   if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
-    if (/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)=/m.test(envContent)) {
+    if (
+      /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY)=/m.test(
+        envContent,
+      )
+    ) {
       credentials = 'configured';
+    }
+  }
+  if (authProfilesCount > 0 && fs.existsSync(encryptedVault)) {
+    credentials = 'configured';
+  }
+
+  // 3.5 Check web tooling readiness against configured provider chain
+  const webEnv = readEnvFile([
+    'WEB_SEARCH_PROVIDER',
+    'WEB_FETCH_PROVIDER',
+    'SEARXNG_BASE_URL',
+    'WEB_BROWSER_FALLBACK',
+    'WEB_TOOL_PRIMARY',
+  ]);
+  const webPrimary =
+    (
+      process.env.WEB_SEARCH_PROVIDER ||
+      webEnv.WEB_SEARCH_PROVIDER ||
+      process.env.WEB_TOOL_PRIMARY ||
+      webEnv.WEB_TOOL_PRIMARY ||
+      'auto'
+    )
+      .trim()
+      .toLowerCase();
+  const webFallback =
+    (process.env.WEB_BROWSER_FALLBACK || webEnv.WEB_BROWSER_FALLBACK || 'playwright')
+      .trim()
+      .toLowerCase();
+  const webFetchProvider =
+    (process.env.WEB_FETCH_PROVIDER || webEnv.WEB_FETCH_PROVIDER || 'auto')
+      .trim()
+      .toLowerCase();
+  const searxngBaseUrl = (
+    process.env.SEARXNG_BASE_URL ||
+    webEnv.SEARXNG_BASE_URL ||
+    'http://127.0.0.1:8888'
+  ).replace(/\/$/, '');
+  let playwright = 'skipped';
+  let searxng = 'skipped';
+  const requiresPlaywright =
+    webPrimary === 'playwright' ||
+    webFetchProvider === 'playwright' ||
+    webFallback === 'playwright';
+  const shouldProbeSearxng = webPrimary === 'auto' || webPrimary === 'searxng';
+
+  if (requiresPlaywright) {
+    try {
+      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      execSync(
+        `${npmCmd} --prefix container/agent-runner exec playwright -- --version`,
+        { stdio: 'ignore' },
+      );
+      playwright = 'ready';
+    } catch {
+      playwright = 'missing';
+    }
+  }
+  if (shouldProbeSearxng) {
+    try {
+      const response = await fetch(
+        `${searxngBaseUrl}/search?q=microclaw&format=json`,
+        { signal: AbortSignal.timeout(4000) },
+      );
+      searxng = response.ok ? 'ready' : 'degraded';
+    } catch {
+      searxng = webPrimary === 'auto' ? 'degraded' : 'missing';
     }
   }
 
@@ -118,7 +203,7 @@ export async function run(_args: string[]): Promise<void> {
 
   // WhatsApp: check for auth credentials on disk
   const authDir = path.join(projectRoot, 'store', 'auth');
-  if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
+  if (fs.existsSync(path.join(authDir, 'creds.json'))) {
     channelAuth.whatsapp = 'authenticated';
   }
 
@@ -141,10 +226,10 @@ export async function run(_args: string[]): Promise<void> {
 
   // 5. Check registered groups (using better-sqlite3, not sqlite3 CLI)
   let registeredGroups = 0;
-  const dbPath = path.join(STORE_DIR, 'messages.db');
-  if (fs.existsSync(dbPath)) {
+  const dbPathForGroups = path.join(STORE_DIR, 'messages.db');
+  if (fs.existsSync(dbPathForGroups)) {
     try {
-      const db = new Database(dbPath, { readonly: true });
+      const db = new Database(dbPathForGroups, { readonly: true });
       const row = db
         .prepare('SELECT COUNT(*) as count FROM registered_groups')
         .get() as { count: number };
@@ -159,7 +244,7 @@ export async function run(_args: string[]): Promise<void> {
   let mountAllowlist = 'missing';
   if (
     fs.existsSync(
-      path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'),
+      path.join(homeDir, '.config', 'microclaw', 'mount-allowlist.json'),
     )
   ) {
     mountAllowlist = 'configured';
@@ -169,6 +254,8 @@ export async function run(_args: string[]): Promise<void> {
   const status =
     service === 'running' &&
     credentials !== 'missing' &&
+    playwright !== 'missing' &&
+    searxng !== 'missing' &&
     anyChannelConfigured &&
     registeredGroups > 0
       ? 'success'
@@ -180,8 +267,14 @@ export async function run(_args: string[]): Promise<void> {
     SERVICE: service,
     CONTAINER_RUNTIME: containerRuntime,
     CREDENTIALS: credentials,
+    WEB_PRIMARY: webPrimary,
+    WEB_FALLBACK: webFallback,
+    WEB_FETCH_PROVIDER: webFetchProvider,
+    PLAYWRIGHT: playwright,
+    SEARXNG: searxng,
     CONFIGURED_CHANNELS: configuredChannels.join(','),
     CHANNEL_AUTH: JSON.stringify(channelAuth),
+    AUTH_PROFILES: authProfilesCount,
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
     STATUS: status,

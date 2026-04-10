@@ -20,7 +20,29 @@ import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@
 import { fileURLToPath } from 'url';
 import { createRuntimeAdapter } from './runtime/factory.js';
 import { resolveExternalRuntimeBudgets } from './runtime/budgets.js';
-import { RuntimeConfig, RuntimeProvider } from './runtime/types.js';
+import {
+  ConversationMessage,
+  RuntimeConfig,
+  RuntimeProvider,
+  RuntimeUsageMetrics,
+} from './runtime/types.js';
+import type { RuntimeAdapter } from './runtime/types.js';
+
+/**
+ * Persistent state for a warm OpenAI-compatible session.
+ * Lives across multiple turns in the main query loop — created before the
+ * while(true) loop and reused on every follow-up IPC message.
+ */
+interface ExternalSessionState {
+  /** Reused adapter instance (same HTTP client, same config). */
+  adapter: RuntimeAdapter;
+  /** System prompt built once from containerInput — stable across turns. */
+  systemPrompt: string | undefined;
+  /** Accumulated user+assistant+tool messages from all prior turns. */
+  priorMessages: ConversationMessage[];
+  /** Session ID carried across turns for consistent host tracking. */
+  sessionId: string | undefined;
+}
 
 interface ContainerInput {
   prompt: string;
@@ -49,6 +71,8 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  usage?: RuntimeUsageMetrics;
+  isPartial?: boolean;
 }
 
 interface SessionEntry {
@@ -71,7 +95,10 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = process.env.NANOCLAW_IPC_INPUT_DIR || '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
-const IPC_POLL_MS = 500;
+const IPC_POLL_MS = Math.max(
+  50,
+  Number.parseInt(process.env.NANOCLAW_AGENT_IPC_POLL_MS || '200', 10) || 200,
+);
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -541,18 +568,34 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+/**
+ * Create the initial ExternalSessionState before the query loop.
+ * The adapter and system prompt are built once and reused across all turns.
+ */
+function createExternalSessionState(
+  containerInput: ContainerInput,
+  sessionId: string | undefined,
+): ExternalSessionState {
+  const runtimeConfig = getRuntimeConfig(containerInput);
+  return {
+    adapter: createRuntimeAdapter(runtimeConfig),
+    systemPrompt: buildSystemPrompt(containerInput),
+    priorMessages: [],
+    sessionId,
+  };
+}
+
 async function runExternalRuntimeQuery(
   prompt: string,
-  sessionId: string | undefined,
   containerInput: ContainerInput,
+  sessionState: ExternalSessionState,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   if (shouldClose()) {
     log('Close sentinel detected before non-Claude query');
-    return { newSessionId: sessionId, closedDuringQuery: true };
+    return { newSessionId: sessionState.sessionId, closedDuringQuery: true };
   }
 
   const runtimeConfig = getRuntimeConfig(containerInput);
-  const adapter = createRuntimeAdapter(runtimeConfig);
   const retry = containerInput.retryPolicy || {
     maxAttempts: 1,
     backoffMs: 0,
@@ -564,7 +607,6 @@ async function runExternalRuntimeQuery(
     ? ((retry as { retryableErrors?: unknown[] }).retryableErrors as unknown[])
         .map((x) => String(x))
     : [];
-  const systemPrompt = buildSystemPrompt(containerInput);
   const maxAttempts = Math.max(1, retry.maxAttempts || 1);
   const totalRuntimeBudgetMs = Math.max(10_000, retry.timeoutMs || 90_000);
   const runtimeStartedAt = Date.now();
@@ -616,19 +658,48 @@ async function runExternalRuntimeQuery(
     };
 
     try {
-      const response = await adapter.run({
+      const response = await sessionState.adapter.run({
         prompt,
-        systemPrompt,
+        systemPrompt: sessionState.systemPrompt,
         config: runtimeConfig,
         secrets: boundedSecrets,
+        priorMessages: sessionState.priorMessages.length > 0
+          ? sessionState.priorMessages
+          : undefined,
+        onPartialText: async (text) => {
+          if (!text) return;
+          writeOutput({
+            status: 'success',
+            result: text,
+            newSessionId: sessionState.sessionId,
+            isPartial: true,
+          });
+        },
       });
+
+      // Accumulate conversation history (user + assistant pairs) for the next warm turn.
+      // Tool call internals are omitted for simplicity — the assistant's textual response
+      // is sufficient for follow-up conversational context.
+      sessionState.priorMessages = [
+        ...sessionState.priorMessages,
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: response.result },
+      ];
+
+      // Carry the session ID forward so it stays stable across warm turns.
+      if (response.sessionId) {
+        sessionState.sessionId = response.sessionId;
+      }
+
       writeOutput({
         status: 'success',
         result: response.result,
-        newSessionId: response.sessionId,
+        newSessionId: sessionState.sessionId,
+        usage: response.usage,
+        isPartial: false,
       });
       return {
-        newSessionId: response.sessionId,
+        newSessionId: sessionState.sessionId,
         closedDuringQuery: false,
       };
     } catch (err) {
@@ -655,11 +726,11 @@ async function runExternalRuntimeQuery(
   writeOutput({
     status: 'error',
     result: null,
-    newSessionId: sessionId,
+    newSessionId: sessionState.sessionId,
     error: lastError?.message || 'Unknown runtime error',
   });
   return {
-    newSessionId: sessionId,
+    newSessionId: sessionState.sessionId,
     closedDuringQuery: false,
   };
 }
@@ -705,14 +776,23 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
-  if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
+  if (containerInput.isHeartbeat) {
+    prompt = `[HEARTBEAT CHECK - This is an automated diagnostic check, NOT a user message. Do NOT schedule new tasks or register new watches. Review the checklist below and respond ONLY if something needs the user's attention. If nothing needs attention, respond with exactly: HEARTBEAT_OK]\n\n${prompt}`;
+  } else if (containerInput.isScheduledTask) {
+    prompt = `[SCHEDULED TASK EXECUTION - This task was already scheduled and is now firing. DO NOT call schedule_task, schedule_once_task, schedule_recurring_task, schedule_interval_task, or register_watch. Simply execute the task described below and return the result directly.]\n\n${prompt}`;
   }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
     prompt += '\n' + pending.join('\n');
   }
+
+  // Create session state once before the loop so the adapter and conversation
+  // history are reused across warm follow-up turns (OpenAI-compatible only).
+  const externalSessionState =
+    runtimeProvider !== 'claude'
+      ? createExternalSessionState(containerInput, sessionId)
+      : null;
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
@@ -730,9 +810,13 @@ async function main(): Promise<void> {
               sdkEnv,
               resumeAt,
             )
-          : await runExternalRuntimeQuery(prompt, sessionId, containerInput);
+          : await runExternalRuntimeQuery(prompt, containerInput, externalSessionState!);
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
+      }
+      // Keep externalSessionState.sessionId in sync with the loop-level sessionId.
+      if (externalSessionState && externalSessionState.sessionId) {
+        sessionId = externalSessionState.sessionId;
       }
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
@@ -748,14 +832,6 @@ async function main(): Promise<void> {
 
       if (containerInput.singleTurn) {
         log('Single-turn mode enabled, exiting after first query');
-        break;
-      }
-
-      // OpenAI-compatible runtimes are request/response by nature.
-      // Keep them single-turn to avoid idle IPC loops that can outlive the
-      // real answer and then trip host-side timeouts.
-      if (runtimeProvider !== 'claude') {
-        log('External runtime mode: exiting after first query');
         break;
       }
 

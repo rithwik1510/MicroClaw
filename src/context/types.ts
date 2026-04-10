@@ -29,11 +29,17 @@ export interface ContextDiagnostics {
   groupFolder: string;
   promptPreview: string;
   strongKeywords: string[];
+  turnMode:
+    | 'conversational'
+    | 'memory_assisted'
+    | 'web_browser'
+    | 'scheduling_planning';
   charsPerTokenSafetyRatio: number;
   softCapChars: number;
   hardCapChars: number;
   reservedToolChars: number;
   estimatedToolSchemaChars: number;
+  actualToolSchemaChars: number;
   totalLayerChars: number;
   finalChars: number;
   estimatedFinalTokens: number;
@@ -52,6 +58,9 @@ export interface MemoryCandidate {
   text: string;
   source: 'user';
   timestamp: string;
+  origin: 'auto_capture' | 'explicit_request';
+  durability: 'session' | 'durable' | 'pinned';
+  confidence: number;
 }
 
 export interface MemoryDoctorIssue {

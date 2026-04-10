@@ -51,6 +51,35 @@ describe('memory helpers', () => {
     expect(candidates[0]?.kind).toBe('pref');
   });
 
+  it('filters low-signal question and instruction style memory candidates', async () => {
+    const { extractMemoryCandidates } = await import('./memory.js');
+    const candidates = extractMemoryCandidates(
+      [
+        {
+          id: '1',
+          chat_jid: 'dc:test',
+          sender: 'user',
+          sender_name: 'User',
+          content: 'dont do a search, just explain me what i need to do there',
+          timestamp: '2026-03-07T10:00:00.000Z',
+        },
+        {
+          id: '2',
+          chat_jid: 'dc:test',
+          sender: 'user',
+          sender_name: 'User',
+          content:
+            'I prefer practical replies that get straight to the point',
+          timestamp: '2026-03-07T10:01:00.000Z',
+        },
+      ],
+      'Andy',
+    );
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.text).toContain('I prefer practical replies');
+  });
+
   it('appends tagged daily notes and compacts them into MEMORY.md', async () => {
     const { appendDailyMemoryNotes, compactMemory } =
       await import('./memory.js');
@@ -62,12 +91,18 @@ describe('memory helpers', () => {
           text: 'we are building an open claw style app on local models',
           source: 'user',
           timestamp: '2026-03-07T10:00:00.000Z',
+          origin: 'auto_capture',
+          durability: 'durable',
+          confidence: 0.82,
         },
         {
           kind: 'pref',
           text: 'user prefers concise answers',
           source: 'user',
           timestamp: '2026-03-07T10:01:00.000Z',
+          origin: 'auto_capture',
+          durability: 'durable',
+          confidence: 0.9,
         },
       ],
       new Date('2026-03-07T10:30:00.000Z'),
