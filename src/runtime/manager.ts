@@ -90,6 +90,35 @@ function providerDefaultModel(provider: RuntimeProvider): string {
   }
 }
 
+function envConfiguredOpenAICompatibleRuntime(): boolean {
+  const env = readEnvFile([
+    'OPENAI_API_KEY',
+    'NANOCLAW_DEFAULT_MODEL',
+    'NANOCLAW_DEFAULT_BASE_URL',
+    'OPENAI_COMPAT_BASE_URL',
+  ]);
+
+  const apiKey = process.env.OPENAI_API_KEY || env.OPENAI_API_KEY;
+  const defaultModel =
+    process.env.NANOCLAW_DEFAULT_MODEL || env.NANOCLAW_DEFAULT_MODEL;
+  const defaultBaseUrl =
+    process.env.NANOCLAW_DEFAULT_BASE_URL ||
+    env.NANOCLAW_DEFAULT_BASE_URL ||
+    process.env.OPENAI_COMPAT_BASE_URL ||
+    env.OPENAI_COMPAT_BASE_URL;
+
+  return !!(apiKey && (defaultModel || defaultBaseUrl));
+}
+
+function preferEnvRuntimeOverride(): boolean {
+  const env = readEnvFile(['NANOCLAW_PREFER_ENV_RUNTIME']);
+  const raw =
+    process.env.NANOCLAW_PREFER_ENV_RUNTIME ||
+    env.NANOCLAW_PREFER_ENV_RUNTIME ||
+    '';
+  return raw.trim().toLowerCase() === 'true';
+}
+
 export function getBuiltinDefaultProfile(): RuntimeProfile {
   const env = readEnvFile([
     'NANOCLAW_DEFAULT_PROVIDER',
@@ -181,6 +210,10 @@ function resolveFromPolicy(
 export function resolveRuntimeSelection(groupFolder: string): RuntimeSelection {
   const dbProfiles = getAllRuntimeProfiles().filter((p) => p.enabled);
   const builtin = getBuiltinDefaultProfile();
+  const preferEnvRuntime =
+    builtin.provider === 'openai_compatible' &&
+    envConfiguredOpenAICompatibleRuntime() &&
+    preferEnvRuntimeOverride();
 
   // No stored profiles yet: use built-in default.
   if (dbProfiles.length === 0) {
@@ -196,7 +229,9 @@ export function resolveRuntimeSelection(groupFolder: string): RuntimeSelection {
     fromPolicy.length > 0
       ? fromPolicy
       : [...dbProfiles].sort((a, b) => a.priority - b.priority);
-  const constrained = constrainFallbackProviderFamily(ordered);
+  const constrained = constrainFallbackProviderFamily(
+    preferEnvRuntime ? [builtin, ...ordered] : ordered,
+  );
 
   return {
     profiles: dedupeProfiles(constrained),

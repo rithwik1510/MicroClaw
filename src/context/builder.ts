@@ -2,7 +2,11 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from '../config.js';
-import { getPinnedMemoryEntries, queryMemoryFts } from '../db.js';
+import {
+  getPinnedMemoryEntries,
+  queryMemoryExact,
+  queryMemoryFts,
+} from '../db.js';
 import {
   CONTEXT_CHARS_PER_TOKEN_SAFETY_RATIO,
   CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS,
@@ -26,6 +30,9 @@ interface BuildContextBundleInput {
   groupFolder: string;
   prompt: string;
   today?: Date;
+  turnMode?: 'conversational' | 'memory_assisted' | 'web_browser' | 'scheduling_planning';
+  reservedToolChars?: number;
+  actualToolSchemaChars?: number;
 }
 
 type MarkdownSection = {
@@ -42,6 +49,14 @@ type CandidateFile = {
   maxChars: number;
   trimMode: 'tail' | 'head';
 };
+
+type FileSnapshot = {
+  raw: string;
+  mtimeMs: number;
+};
+
+const fileSnapshotCache = new Map<string, FileSnapshot>();
+const staticLayerCache = new Map<string, ContextLayer>();
 
 const PLACEHOLDER_MATCHERS: Partial<Record<ContextSourceKind, string[]>> = {
   soul: [
@@ -99,8 +114,12 @@ const GENERIC_KEYWORDS = new Set([
   'agent',
   'build',
   'building',
+  'change',
   'chat',
+  'check',
   'current',
+  'everything',
+  'feed',
   'find',
   'hello',
   'help',
@@ -120,6 +139,9 @@ const GENERIC_KEYWORDS = new Set([
   'tool',
   'web',
   'what',
+  'must',
+  'need',
+  'now',
 ]);
 
 function normalizeMarkdown(text: string): string {
@@ -190,6 +212,17 @@ function extractStrongKeywords(promptText: string): string[] {
   const quoted = Array.from(promptText.matchAll(/"([^"]{4,80})"/g))
     .map((match) => match[1].trim().toLowerCase())
     .filter((value) => value.split(/\s+/).length <= 5);
+  const urls = Array.from(promptText.matchAll(/https?:\/\/[^\s<>"']+/gi)).map(
+    (match) => match[0].toLowerCase(),
+  );
+  const domains = Array.from(
+    promptText.matchAll(
+      /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/gi,
+    ),
+  ).map((match) => match[0].toLowerCase());
+  const identifiers =
+    promptText.match(/\b[A-Z][A-Za-z0-9_-]{2,}\b|\b[a-z]+[A-Z][A-Za-z0-9_-]*\b/g) ||
+    [];
 
   const tokens =
     promptText.toLowerCase().match(/[a-z0-9][a-z0-9._/-]{3,}/g) || [];
@@ -200,13 +233,36 @@ function extractStrongKeywords(promptText: string): string[] {
     return true;
   });
 
-  const merged = [...quoted, ...filtered];
+  const merged = [...quoted, ...urls, ...domains, ...identifiers.map((v) => v.toLowerCase()), ...filtered];
   return Array.from(new Set(merged)).slice(0, 12);
 }
 
+function readFileSnapshotIfPresent(filePath: string): FileSnapshot | null {
+  if (!fs.existsSync(filePath)) return null;
+  const stat = fs.statSync(filePath);
+  const cached = fileSnapshotCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs) {
+    return cached;
+  }
+  const snapshot = {
+    raw: normalizeMarkdown(fs.readFileSync(filePath, 'utf8')),
+    mtimeMs: stat.mtimeMs,
+  };
+  fileSnapshotCache.set(filePath, snapshot);
+  return snapshot;
+}
+
 function readFileIfPresent(filePath: string): string {
-  if (!fs.existsSync(filePath)) return '';
-  return normalizeMarkdown(fs.readFileSync(filePath, 'utf8'));
+  return readFileSnapshotIfPresent(filePath)?.raw || '';
+}
+
+function isStaticLayerKind(kind: ContextSourceKind): boolean {
+  return (
+    kind === 'soul' ||
+    kind === 'identity' ||
+    kind === 'user' ||
+    kind === 'tools'
+  );
 }
 
 function looksLikePlaceholder(kind: ContextSourceKind, raw: string): boolean {
@@ -415,6 +471,13 @@ function dedupe(items: string[], maxItems: number): string[] {
   return result;
 }
 
+function withoutOverlaps(items: string[], excluded: string[]): string[] {
+  const excludedSet = new Set(
+    excluded.map((item) => item.trim().toLowerCase()).filter(Boolean),
+  );
+  return items.filter((item) => !excludedSet.has(item.trim().toLowerCase()));
+}
+
 function isPlaceholderBullet(line: string): boolean {
   const normalized = line.trim().toLowerCase();
   return [
@@ -516,15 +579,17 @@ function buildCompactMemoryContent(raw: string, keywords: string[]): string {
     ],
     4,
   );
+  const filteredAnchorBullets = withoutOverlaps(anchorBullets, standing?.bullets || []);
+  const filteredRelevantBullets = withoutOverlaps(relevantBullets, filteredAnchorBullets);
 
   const lines = ['# Memory'];
-  if (anchorBullets.length > 0) {
+  if (filteredAnchorBullets.length > 0) {
     lines.push('', '## Current Focus');
-    for (const bullet of anchorBullets) lines.push(`- ${bullet}`);
+    for (const bullet of filteredAnchorBullets) lines.push(`- ${bullet}`);
   }
-  if (relevantBullets.length > 0) {
+  if (filteredRelevantBullets.length > 0) {
     lines.push('', '## Relevant Notes');
-    for (const bullet of relevantBullets) lines.push(`- ${bullet}`);
+    for (const bullet of filteredRelevantBullets) lines.push(`- ${bullet}`);
   }
   return lines.join('\n');
 }
@@ -547,7 +612,8 @@ function buildFileLayer(
   candidate: CandidateFile,
   keywords: string[],
 ): ContextLayer {
-  const raw = readFileIfPresent(candidate.filePath);
+  const snapshot = readFileSnapshotIfPresent(candidate.filePath);
+  const raw = snapshot?.raw || '';
   if (!raw) {
     return {
       kind: candidate.kind,
@@ -561,6 +627,23 @@ function buildFileLayer(
       trimmedChars: 0,
       content: '',
     };
+  }
+  const staticCacheKey =
+    snapshot && isStaticLayerKind(candidate.kind)
+      ? [
+          candidate.filePath,
+          snapshot.mtimeMs,
+          candidate.maxChars,
+          candidate.trimMode,
+          candidate.kind,
+          keywords.join('\u0001'),
+        ].join('::')
+      : null;
+  if (staticCacheKey) {
+    const cached = staticLayerCache.get(staticCacheKey);
+    if (cached) {
+      return cached;
+    }
   }
   if (looksLikePlaceholder(candidate.kind, raw)) {
     return {
@@ -599,7 +682,7 @@ function buildFileLayer(
   );
   const content =
     `${kindHeading(candidate.kind, candidate.label)}\n${trimmed}`.trim();
-  return {
+  const layer = {
     kind: candidate.kind,
     scope: candidate.scope,
     label: candidate.label,
@@ -611,6 +694,10 @@ function buildFileLayer(
     trimmedChars: content.length,
     content,
   };
+  if (staticCacheKey) {
+    staticLayerCache.set(staticCacheKey, layer);
+  }
+  return layer;
 }
 
 function suppressLegacyLayersIfModernContextPresent(
@@ -879,16 +966,38 @@ export function buildContextBundle(
 ): ContextBundle {
   const promptText = extractPromptText(input.prompt);
   const strongKeywords = extractStrongKeywords(promptText);
+  const turnMode = input.turnMode || 'conversational';
   const layers = buildCandidateFiles(input.groupFolder).map((candidate) =>
     buildFileLayer(candidate, strongKeywords),
   );
-  layers.push(
-    buildDailyLayer(
-      input.groupFolder,
-      input.today || new Date(),
-      strongKeywords,
-    ),
-  );
+  if (turnMode !== 'conversational' || strongKeywords.length >= 2) {
+    layers.push(
+      buildDailyLayer(
+        input.groupFolder,
+        input.today || new Date(),
+        strongKeywords,
+      ),
+    );
+  } else {
+    layers.push({
+      kind: 'daily',
+      scope: 'group',
+      label: `Daily notes (${(input.today || new Date()).toISOString().slice(0, 10)})`,
+      filePath: path.join(
+        GROUPS_DIR,
+        input.groupFolder,
+        'memory',
+        `${(input.today || new Date()).toISOString().slice(0, 10)}.md`,
+      ),
+      included: false,
+      inclusionReason:
+        strongKeywords.length === 0 ? 'no_strong_keywords' : 'turn_mode_suppressed',
+      trimMode: 'head',
+      rawChars: 0,
+      trimmedChars: 0,
+      content: '',
+    });
+  }
 
   // FTS5 retrieval: ensure index is populated, then fetch relevant snippets
   try {
@@ -903,21 +1012,68 @@ export function buildContextBundle(
       return [];
     }
   })();
-  const retrievedEntries =
+  const exactEntries =
     strongKeywords.length > 0
-      ? queryMemoryFts({
-          groupFolder: input.groupFolder,
-          keywords: strongKeywords,
-          limit: CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
-        })
+      ? (() => {
+          try {
+            return queryMemoryExact({
+              groupFolder: input.groupFolder,
+              phrases: strongKeywords,
+              limit: Math.max(
+                4,
+                Math.floor(CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS / 2),
+              ),
+            });
+          } catch {
+            return [];
+          }
+        })()
       : [];
+  const ftsEntries =
+    strongKeywords.length > 0
+      ? (() => {
+          try {
+            return queryMemoryFts({
+              groupFolder: input.groupFolder,
+              keywords: strongKeywords,
+              limit: CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
+            });
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  const retrievedEntries = dedupe(
+    [...exactEntries, ...ftsEntries].map((entry) => `[${entry.kind}] ${entry.content}`),
+    CONTEXT_MAX_RETRIEVED_MEMORY_ITEMS,
+  ).map((line, index) => ({
+    content: line.replace(/^\[[^\]]+\]\s+/, ''),
+    kind: line.match(/^\[([^\]]+)\]/)?.[1] || 'memory',
+    rank: index,
+  }));
   layers.push(buildRetrievedMemoryLayer(pinnedEntries, retrievedEntries));
+
+  for (const layer of layers) {
+    if (
+      layer.kind === 'memory' &&
+      turnMode === 'conversational' &&
+      strongKeywords.length < 2
+    ) {
+      layer.included = false;
+      layer.content = '';
+      layer.trimmedChars = 0;
+      layer.inclusionReason = 'turn_mode_suppressed';
+    }
+  }
 
   suppressLegacyLayersIfModernContextPresent(layers);
 
+  const reservedToolChars = input.reservedToolChars || CONTEXT_RESERVED_TOOL_CHARS;
+  const actualToolSchemaChars =
+    input.actualToolSchemaChars || CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS;
   const warnings = shrinkLayersToBudget(
     layers,
-    CONTEXT_SOFT_CAP_CHARS - CONTEXT_RESERVED_TOOL_CHARS,
+    CONTEXT_SOFT_CAP_CHARS - reservedToolChars,
   );
   warnings.push(...enforceFinalPromptHardCap(layers, CONTEXT_HARD_CAP_CHARS));
   const systemPrompt = joinLayers(layers);
@@ -929,11 +1085,13 @@ export function buildContextBundle(
       groupFolder: input.groupFolder,
       promptPreview: promptText.slice(0, 240),
       strongKeywords,
+      turnMode,
       charsPerTokenSafetyRatio: CONTEXT_CHARS_PER_TOKEN_SAFETY_RATIO,
       softCapChars: CONTEXT_SOFT_CAP_CHARS,
       hardCapChars: CONTEXT_HARD_CAP_CHARS,
-      reservedToolChars: CONTEXT_RESERVED_TOOL_CHARS,
+      reservedToolChars,
       estimatedToolSchemaChars: CONTEXT_ESTIMATED_TOOL_SCHEMA_CHARS,
+      actualToolSchemaChars,
       totalLayerChars: layers.reduce((sum, layer) => sum + layer.rawChars, 0),
       finalChars,
       estimatedFinalTokens: Math.ceil(
