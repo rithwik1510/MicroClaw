@@ -751,6 +751,7 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     baseUrl: string;
     maxOutputTokens: number;
     toolSchemaChars: number;
+    priorMessagesChars: number;
     turnMode: TurnMode;
   }): number {
     const explicitChars = this.tryParsePositiveInt(
@@ -774,7 +775,22 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         ? OpenAIRuntimeAdapter.DEFAULT_LOCAL_CONTEXT_WINDOW_TOKENS
         : 0);
 
-    if (contextWindowTokens <= 0) return 0;
+    if (contextWindowTokens <= 0) {
+      // Cloud provider: set a whole-request budget, then subtract priorMessages
+      // and tool schema so the system + user prompt fit in the remaining space.
+      // Without this, unbounded priorMessages + large tool schemas fill the
+      // context window silently and slow TTFT on every turn.
+      const cloudTotalChars =
+        input.turnMode === 'web_browser' || input.turnMode === 'scheduling_planning'
+          ? 36_000
+          : input.turnMode === 'memory_assisted'
+            ? 28_000
+            : 24_000; // conversational
+      const alreadyUsed =
+        input.priorMessagesChars +
+        Math.ceil(input.toolSchemaChars * 1.05); // 5% safety margin for tool schema
+      return Math.max(8_000, cloudTotalChars - alreadyUsed);
+    }
 
     const outputReserveTokens = Math.max(
       256,
@@ -1314,7 +1330,10 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     maxOutputTokens: number;
   }): number {
     if (input.route === 'plain_response' && !input.sawToolCalls) {
-      return input.maxOutputTokens;
+      // Cap conversational responses: they rarely need more than 1536 tokens.
+      // Smaller max_tokens improves TTFT on vLLM-based providers (DeepInfra)
+      // which pre-allocate KV cache proportional to max_tokens.
+      return Math.min(input.maxOutputTokens, 1536);
     }
     return Math.min(
       input.maxOutputTokens,
@@ -1805,7 +1824,15 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
     }
     // Model verbally announced a search/fetch but never called a tool —
     // treat as needing forced prefetch so the actual search runs.
-    return /\b(let me (check|search|look up|lookup|fetch|find|get|pull up)|searching now|fetching|i['']ll (search|look|check|fetch)|looking that up|one moment|checking now)\b/.test(t);
+    if (/\b(let me (check|search|look up|lookup|fetch|find|get|pull up)|searching now|fetching|i['']ll (search|look|check|fetch)|looking that up|one moment|checking now)\b/.test(t)) {
+      return true;
+    }
+    // Model output literal function-call notation as text instead of a structured tool call —
+    // e.g. web_search("query") or search("query"). Treat as stale-knowledge fallback.
+    if (/^\s*(web_search|search|browse_web|fetch_web)\s*\(/.test(text)) {
+      return true;
+    }
+    return false;
   }
 
   private isStrongWebIntent(prompt: string): boolean {
@@ -2211,8 +2238,35 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       planningIntensity,
       false,
     );
-    const registry = [...baseRegistry, ...plannerTools];
-    const tools = [...baseTools, ...toOpenAITools(plannerTools)];
+
+    // Intent-aware tool schema reduction: strip unused scheduling variants when
+    // there is no scheduling or watch intent. This reduces schema size from
+    // ~50KB to ~3KB (plain_response) or ~8KB (web_lookup), cutting input tokens
+    // and improving TTFT on every conversational and web-search turn.
+    const routePrunedRegistry =
+      !schedulingIntent && !watchIntent
+        ? baseRegistry.filter((tool) => {
+            if (route === 'plain_response') {
+              return (
+                tool.family === 'memory' ||
+                tool.name === 'schedule_task' ||
+                tool.name === 'register_watch'
+              );
+            }
+            if (route === 'web_lookup') {
+              return (
+                tool.family === 'web' ||
+                tool.family === 'memory' ||
+                tool.name === 'schedule_task' ||
+                tool.name === 'register_watch'
+              );
+            }
+            return true;
+          })
+        : baseRegistry;
+
+    const registry = [...routePrunedRegistry, ...plannerTools];
+    const tools = [...toOpenAITools(routePrunedRegistry), ...toOpenAITools(plannerTools)];
     const turnMode = this.resolveTurnMode({
       req,
       route,
@@ -2240,12 +2294,28 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         browserEnabled,
         safeToolsPresent,
         metaToolsPresent,
-      });
+      }) &&
+      // For plain conversational turns with streaming available, use the faster
+      // non-tool-loop streaming path. The non-tool-loop path streams immediately
+      // and avoids per-iteration postJson overhead. Scheduling and watch intent
+      // still require the tool loop for proper tool execution.
+      !(
+        route === 'plain_response' &&
+        turnMode === 'conversational' &&
+        !schedulingIntent &&
+        !watchIntent &&
+        useStreaming
+      );
+    const priorMessagesChars = (req.priorMessages || []).reduce(
+      (sum, m) => sum + m.content.length,
+      0,
+    );
     const inputBudgetChars = this.resolveInputBudgetChars({
       req,
       baseUrl,
       maxOutputTokens,
       toolSchemaChars: shouldUseToolLoop ? toolSchemaChars : 0,
+      priorMessagesChars,
       turnMode,
     });
 
@@ -2339,8 +2409,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
               registry: activeRegistry,
               tools: activeTools,
             } = this.activeToolsForTurn({
-              baseRegistry,
-              baseTools,
+              baseRegistry: routePrunedRegistry,
+              baseTools: toOpenAITools(routePrunedRegistry),
               plannerState,
               planningIntensity,
               sawToolCalls: sawToolCalls && schedulingResolved,
@@ -2374,28 +2444,87 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
                     maxOutputTokens,
                   }),
             };
-            const payload = (await postJson(
-              `${baseUrl.replace(/\/$/, '')}/chat/completions`,
-              requestBody,
-              authHeaders,
-              perRequestTimeoutMs,
-            )) as {
-              choices?: Array<{
-                message?: {
-                  content?: string;
-                  tool_calls?: Array<{
-                    id?: string;
-                    type?: string;
-                    function?: { name?: string; arguments?: string };
-                  }>;
-                };
-              }>;
-            };
+            type LoopToolCall = { id?: string; type?: string; function?: { name?: string; arguments?: string } };
+            let content = '';
+            let toolCalls: LoopToolCall[] = [];
 
-            const choice = payload.choices?.[0]?.message;
-            const content = choice?.content?.trim() || '';
-            this.recordUsage(usage, payload, requestBody, content);
-            const toolCalls = choice?.tool_calls || [];
+            // Streaming strategy:
+            // - Synthesis step (sawToolCalls=true): always stream — model generates
+            //   final text after tool results, no further tool calls expected.
+            // - First iteration of remaining plain_response tool-loop turns
+            //   (e.g., memory_assisted mode): stream — model likely generates text.
+            //   If it unexpectedly calls a tool (stream returns empty), fall back to
+            //   postJson to capture tool_calls and execute them normally.
+            const streamThisIteration =
+              useStreaming &&
+              Boolean(req.onPartialText) &&
+              (sawToolCalls ||
+                (!sawToolCalls &&
+                  route === 'plain_response' &&
+                  !schedulingIntent &&
+                  !watchIntent));
+
+            if (streamThisIteration) {
+              try {
+                const streamed = await this.streamChatCompletion({
+                  baseUrl,
+                  authHeaders,
+                  requestTimeoutMs: perRequestTimeoutMs,
+                  requestBody,
+                  usage,
+                  onPartialText: req.onPartialText,
+                });
+                if (streamed.trim() || sawToolCalls) {
+                  // Got visible text (or we're in synthesis where empty is OK).
+                  content = streamed;
+                  // toolCalls stays [] — loop will break naturally.
+                } else {
+                  // Stream returned no visible text — model likely called a tool.
+                  // Re-issue with postJson to capture tool_calls.
+                  const p = (await postJson(
+                    `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+                    requestBody,
+                    authHeaders,
+                    perRequestTimeoutMs,
+                  )) as { choices?: Array<{ message?: { content?: string; tool_calls?: LoopToolCall[] } }> };
+                  const ch = p.choices?.[0]?.message;
+                  content = ch?.content?.trim() || '';
+                  this.recordUsage(usage, p, requestBody, content);
+                  toolCalls = ch?.tool_calls || [];
+                }
+              } catch {
+                // Stream failed mid-way — fall back to non-streaming.
+                const p = (await postJson(
+                  `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+                  requestBody,
+                  authHeaders,
+                  perRequestTimeoutMs,
+                )) as { choices?: Array<{ message?: { content?: string; tool_calls?: LoopToolCall[] } }> };
+                const ch = p.choices?.[0]?.message;
+                content = ch?.content?.trim() || '';
+                this.recordUsage(usage, p, requestBody, content);
+                toolCalls = ch?.tool_calls || [];
+              }
+            } else {
+              const payload = (await postJson(
+                `${baseUrl.replace(/\/$/, '')}/chat/completions`,
+                requestBody,
+                authHeaders,
+                perRequestTimeoutMs,
+              )) as {
+                choices?: Array<{
+                  message?: {
+                    content?: string;
+                    tool_calls?: LoopToolCall[];
+                  };
+                }>;
+              };
+              const choice = payload.choices?.[0]?.message;
+              content = choice?.content?.trim() || '';
+              this.recordUsage(usage, payload, requestBody, content);
+              toolCalls = choice?.tool_calls || [];
+            }
+
             if (content) lastAssistantContent = content;
             if (toolCalls.length === 0) {
               if (
@@ -2791,7 +2920,13 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
           ...priorNonSystemMessages,
           { role: 'user', content: fittedSimplePrompts.userPrompt },
         ],
-        max_tokens: maxOutputTokens,
+        // Cap max_tokens for conversational turns — they rarely need 4096 tokens.
+        // vLLM-based providers (DeepInfra) pre-allocate KV cache for max_tokens,
+        // so smaller values improve TTFT.
+        max_tokens:
+          turnMode === 'conversational' && !isLocal
+            ? Math.min(maxOutputTokens, 1536)
+            : maxOutputTokens,
       };
       if (useStreaming) {
         let sawPartial = false;
