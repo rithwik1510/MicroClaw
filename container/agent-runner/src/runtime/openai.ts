@@ -1789,6 +1789,8 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
       '- Use web_fetch when you have a URL or a search result to read.',
       '- Use browser tools only on browser-operation turns, not on web-lookup turns.',
       '- Base the final answer on fetched page content or structured search results, never raw search engine chrome.',
+      '- Write a clean, well-structured response — never paste raw "Search provider:", "Search results:", or URL dump lines into your reply.',
+      '- Synthesize the information into a conversational, engaging answer with your own personality.',
     ].filter(Boolean).join('\n');
   }
 
@@ -2040,10 +2042,26 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
         return `Live web lookup failed: ${reason || 'temporary tool error'}.`;
       }
 
-      const webContext = prefetch.content.slice(0, 7000);
       const extractedSources = this.extractSources(prefetch.content);
       this.saveSources(searchQuery, extractedSources);
       const fallbackSummary = this.buildWebFallbackSummary(prefetch.content);
+
+      // Strip technical headers ("Search provider:", "Search results:", URLs-only lines)
+      // before sending to the synthesis model — Qwen echoes them verbatim otherwise.
+      const cleanWebContext = prefetch.content
+        .split('\n')
+        .filter(
+          (line) =>
+            !/^search provider:/i.test(line.trim()) &&
+            !/^search results:$/i.test(line.trim()) &&
+            !/^fetched source excerpts:$/i.test(line.trim()) &&
+            !/^fetched pages:$/i.test(line.trim()) &&
+            !/^sources:$/i.test(line.trim()),
+        )
+        .join('\n')
+        .trim()
+        .slice(0, 6000);
+
       try {
         const requestBody = {
           model: input.model,
@@ -2051,12 +2069,12 @@ export class OpenAIRuntimeAdapter implements RuntimeAdapter {
             {
               role: 'system',
               content:
-                'Use the provided web context to answer factually and concisely. Return a clean final answer (no XML).',
+                'You are a sharp, personable AI assistant. Using the web search results below, write a clean, well-structured answer. Be conversational and engaging — use your personality. Format clearly (bullet points or short paragraphs as appropriate). Do NOT echo the raw result format. Do NOT include "Search provider", raw URLs, or unformatted result dumps. Synthesize the information into a natural, helpful response.',
             },
             {
               role: 'user',
               content: this.prepareUserPrompt(
-                `User request:\n${searchQuery}\n\nWeb context:\n${webContext}\n\nAnswer using this context.`,
+                `Question: ${searchQuery}\n\nSearch results:\n${cleanWebContext}\n\nWrite a clean, natural answer based on these results.`,
                 input.model,
               ),
             },
