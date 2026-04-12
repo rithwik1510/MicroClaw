@@ -693,31 +693,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (text && result.isPartial) {
           partialBuffer += text;
           firstVisibleOutputAt ??= Date.now();
-          if (channel.updateMessage && partialBuffer.length <= 1900) {
-            try {
-              if (!streamedMessageRef) {
-                streamedMessageRef = await channel.sendMessage(
-                  chatJid,
-                  partialBuffer,
-                );
-              } else {
-                await channel.updateMessage(
-                  chatJid,
-                  streamedMessageRef,
-                  partialBuffer,
-                );
-              }
-              outputSentToUser = streamedMessageRef !== null;
-              if (outputSentToUser) {
-                await stopTypingNow();
-              }
-            } catch (err) {
-              logger.debug(
-                { group: group.name, err },
-                'Failed to update streamed Discord message',
-              );
-            }
-          }
+          // Keep typing indicator visible — send nothing until the final result.
         } else if (text) {
           firstVisibleOutputAt ??= Date.now();
           if (
